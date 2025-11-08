@@ -1,5 +1,3 @@
-네, 알겠습니다. D13 핀 충돌 문제를 해결하기 위해 메인 릴레이 핀을 D7로 변경했으니, 핀 결선 설명을 최신 `Wattmeter_NanoR4_Real_v2.ino` 코드 기준으로 다시 정리해 드립니다.
-
 ### **Arduino Nano R4 핀 결선 상세 (v2 기준)**
 
 * **MCU:** Arduino Nano R4
