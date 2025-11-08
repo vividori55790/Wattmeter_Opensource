@@ -2,13 +2,16 @@
  * ==============================================================================
  * 0. 라이브러리 포함 및 상수/변수 정의 (Arduino Nano R4 - 실제 동작용)
  * ==============================================================================
+ * [Ver 2.0 - 핀 수정]
+ * 1. D13 (SPI SCK)과 릴레이 핀의 충돌을 해결하기 위해 메인 릴레이 핀을 D7로 변경.
+ *
  * [특징]
  * 1. MCU: Arduino Nano R4 (Renesas RA4M1)
  * 2. Timer: FspTimer.h (Nano R4 호환)
  * 3. Display: Adafruit ILI9341 (TFT)
  * 4. ADC: 14-bit 해상도 (analogReadResolution(14))
  * 5. 데이터 소스: 실제 A3(전압), A4(전류) 핀에서 analogRead() 수행
- * 6. FFT Smaples: 256 (Nano R4 메모리에 최적화 및 발표자료 반영)
+ * 6. FFT Smaples: 256 (Nano R4 메모리에 최적화)
  * 7. 모든 부가기능 포함 (Q, 파형표시, 타이머, Protection, THD)
  */
 
@@ -26,12 +29,17 @@
 #define SERIAL_MODE_PLOTTER 0
 
 // --- 핀 정의 (Nano R4 기준 - 5조 발표자료) ---
-#define VOLTAGE_PIN A3 // ZMPT101B 출력 (OPAMP 경유) [cite: 1565, 1566]
-#define CURRENT_PIN A4 // ACS712 출력 [cite: 1565, 1566]
-#define RELAY_PIN 13   // 릴레이 모듈 제어 핀 (필수 Protection) [cite: 1565, 1566]
-#define TFT_CS 10    // Chip Select (D10) [cite: 1565, 1566]
-#define TFT_DC 9     // Data/Command (D9) [cite: 1565, 1566]
-#define TFT_RST 8    // Reset (D8) [cite: 1565, 1566]
+#define VOLTAGE_PIN A3 // ZMPT101B 출력 (OPAMP 경유)
+#define CURRENT_PIN A4 // ACS712 출력
+
+// --- [핀 수정] ---
+// D13은 SPI의 SCK로 사용해야 하므로 릴레이 핀을 D7로 변경합니다.
+#define RELAY_PIN 7    // 릴레이 모듈 제어 핀 (필수 Protection)
+
+#define TFT_CS 10    // Chip Select (D10)
+#define TFT_DC 9     // Data/Command (D9)
+#define TFT_RST 8    // Reset (D8)
+// SPI 핀 (D11, D13)은 <SPI.h> 라이브러리에서 자동으로 관리됩니다.
 
 // --- [피드백 8조] 부하 제어: PFC(역률개선) 릴레이 핀 ---
 #define PFC_RELAY_PIN 12 // (D12 핀 사용)
@@ -107,14 +115,16 @@ void setup() {
   analogReadResolution(14); // 0-16383 범위 [cite: 1530-1532, 1630-1632, 1754-1756]
 
   // --- 릴레이 핀 초기화 ---
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(RELAY_PIN, OUTPUT); // D7
   digitalWrite(RELAY_PIN, HIGH); // 릴레이 초기 상태: HIGH (안전, NO 접점 가정)
   
   // --- [피드백 8조] PFC 릴레이 핀 초기화 ---
-  pinMode(PFC_RELAY_PIN, OUTPUT);
+  pinMode(PFC_RELAY_PIN, OUTPUT); // D12
   digitalWrite(PFC_RELAY_PIN, LOW); // PFC 릴레이 초기 상태: LOW (OFF)
 
   // --- 디스플레이 설정 ---
+  // (참고: TFT_CS, TFT_DC, TFT_RST는 객체 생성 시 자동 설정되지만,
+  // SPI 핀(D11, D13)은 tft.begin() 호출 시 라이브러리가 자동 관리합니다.)
   setup_display();
 
   // --- 타이머 인터럽트 설정 (Nano R4) ---
@@ -122,13 +132,14 @@ void setup() {
 
 #if (SERIAL_MODE_PLOTTER == 0)
   Serial.println("--- Digital Wattmeter Initialized (Nano R4) ---");
-  Serial.println("--- [REAL HARDWARE MODE] ---");
+  Serial.println("--- [REAL HARDWARE MODE - V2 / Pin Fix] ---");
+  Serial.println("--- Main Relay moved to D7 ---");
   Serial.println("--- 명령을 입력하세요 ---");
   Serial.println("T,분 (예: T,10) - 타이머 설정");
   Serial.println("C - 타이머 취소");
   Serial.println("=========================================");
-  tft.println("System Initialized.");
-  tft.println("Starting Power Measurement...");
+  tft.println("System Initialized. (V2)");
+  tft.println("Relay -> D7");
   
   // (중요) 실제 교정 안내
   Serial.println("!! 중요: V_OFFSET, I_OFFSET, K_V_REAL, K_I_REAL 값을 반드시 교정하세요.");
@@ -219,15 +230,9 @@ void loop() {
  */
 void setup_timer_interrupt() {
   // gpt_timer (FspTimer 객체) 설정
-  // TIMER_MODE_PERIODIC: 주기적 모드
-  // GPT_TIMER_CH0: 사용할 타이머 채널
-  // (SAMPLE_PERIOD_MS * 1000): 주기 (1 * 1000 = 1000 마이크로초)
-  // MICROSECONDS: 단위
   gpt_timer.begin(TIMER_MODE_PERIODIC, GPT_TIMER_CH0, (SAMPLE_PERIOD_MS * 1000), MICROSECONDS);
-  
   // 인터럽트 콜백 함수 지정
   gpt_timer.setCallback(timer_ISR_routine);
-  
   // 타이머 시작
   gpt_timer.start();
 }
@@ -248,7 +253,6 @@ void timer_ISR_routine() {
 
 #if (SERIAL_MODE_PLOTTER == 1)
   // --- 플로터 모드 --- (부가기능 2. 파형 표시)
-  // (참고) K_V_REAL, K_I_REAL은 RMS 계수이므로 피크치 변환 시 sqrt(2)를 곱해야 함.
   Serial.print(V_ac * K_V_REAL * 1.41421); // V_inst (추정치)
   Serial.print(",");
   Serial.println(I_ac * K_I_REAL * 1.41421); // I_inst (추정치)
@@ -422,7 +426,7 @@ void relay_protection_check(float current) {
       digitalWrite(RELAY_PIN, LOW); // 릴레이 동작 (차단)
       Serial.println("******************************************");
       Serial.println("!! OVERCURRENT FAULT (Persistent) !!");
-      Serial.println("!! RELAY (Pin 13) TRIPPED (OFF) !!");
+      Serial.print("!! RELAY (Pin D"); Serial.print(RELAY_PIN); Serial.println(") TRIPPED (OFF) !!");
       Serial.println("******************************************");
 
       // TFT에 영구적인 오류 메시지 표시
@@ -451,7 +455,7 @@ void relay_protection_check(float current) {
       if (timerExpired) {
         // [부가기능 3] 타이머가 만료되었으면 릴레이 OFF
         digitalWrite(RELAY_PIN, LOW);
-        Serial.println("RELAY (Pin 13) OFF - Timer Expired");
+        Serial.print("RELAY (Pin D"); Serial.print(RELAY_PIN); Serial.println(") OFF - Timer Expired");
         
         // TFT에 타이머 만료 표시
         tft.setCursor(10, 220);
@@ -462,7 +466,7 @@ void relay_protection_check(float current) {
       } else {
         // 정상 상태 (타이머가 동작 중이거나, 설정되지 않았음)
         digitalWrite(RELAY_PIN, HIGH); 
-        Serial.println("RELAY (Pin 13) ON - Normal");
+        Serial.print("RELAY (Pin D"); Serial.print(RELAY_PIN); Serial.println(") ON - Normal");
       }
     }
   }
