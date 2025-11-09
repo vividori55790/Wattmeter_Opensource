@@ -1,78 +1,104 @@
 /*
  * ==============================================================================
- * 0. 라이브러리 포함 및 상수/변수 정의 (Arduino Nano R4 - 실제 동작용)
+ * 0. 라이브러리 포함 및 상수/변수 정의 (Arduino Nano R4 - 핀 수정 및 기능 통합)
  * ==============================================================================
- * [Ver 2.0 - 핀 수정]
- * 1. D13 (SPI SCK)과 릴레이 핀의 충돌을 해결하기 위해 메인 릴레이 핀을 D7로 변경.
- *
- * [특징]
+ * [Ver 5.0 - Wi-Fi 모듈 데이터 전송 (JSON)]
  * 1. MCU: Arduino Nano R4 (Renesas RA4M1)
- * 2. Timer: FspTimer.h (Nano R4 호환)
- * 3. Display: Adafruit ILI9341 (TFT)
- * 4. ADC: 14-bit 해상도 (analogReadResolution(14))
- * 5. 데이터 소스: 실제 A3(전압), A4(전류) 핀에서 analogRead() 수행
- * 6. FFT Smaples: 256 (Nano R4 메모리에 최적화)
- * 7. 모든 부가기능 포함 (Q, 파형표시, 타이머, Protection, THD)
+ * 2. Display: Adafruit ILI9341 (TFT) [D10, D9, D8]
+ * 3. Touch: XPT2046 (Touch Panel) [D7, D6]
+ * 4. SPI: D11(MOSI), D12(MISO), D13(SCK) - TFT/Touch 공유
+ * 5. Sensors: A3(Voltage), A4(Current 1 - Ch1), A5(Current 2 - Ch2)
+ * 6. Relays: A2(Main), D4(Relay 1 - Ch1), D5(Relay 2 - Ch2)
+ * 7. 기능: 다중 화면(터치), 파형, 퍼지 경고, 우선순위 부하 차단
+ * 8. [NEW] Wi-Fi: SoftwareSerial (D2/D3)을 통해 JSON 데이터 1초마다 전송
+ * ==============================================================================
  */
 
 // --- 필수 라이브러리 ---
 #include <SPI.h>
-#include <Adafruit_GFX.h>      // ILI9341 그래픽 라이브러리
-#include <Adafruit_ILI9341.h> // ILI9341 드라이버 라이브러리
-#include <FspTimer.h>           // Nano R4 (RA4M1)용 타이머 라이브러리
-#include <arduinoFFT.h>         // FFT 라이브러리 (THD 계산용)
-#include <math.h>               // 수학 함수 (sqrt, sin, acos 등)
+#include <Adafruit_GFX.h>
+#include <Adafruit_ILI9341.h>
+#include <XPT2046_Touchscreen.h> 
+#include <FspTimer.h>
+#include <arduinoFFT.h>
+#include <math.h>
+#include <SoftwareSerial.h> // [NEW] Wi-Fi 모듈 통신용
 
-// --- 시리얼 모드 선택 ---
-// "SERIAL_MODE_PLOTTER"를 1로 설정하면 시리얼 '플로터'용 파형 데이터를 출력합니다. (부가기능 2. 파형 표시)
-// "SERIAL_MODE_PLOTTER"를 0으로 설정하면 'TFT' 및 '시리얼 모니터'용 전력 계산 리포트를 출력합니다.
-#define SERIAL_MODE_PLOTTER 0
+// --- 화면 상태 정의 ---
+enum ScreenState {
+  SCREEN_MAIN_POWER,
+  SCREEN_WAVEFORM,
+  SCREEN_FAULT
+};
+volatile ScreenState currentScreen = SCREEN_MAIN_POWER;
 
-// --- 핀 정의 (Nano R4 기준 - 5조 발표자료) ---
-#define VOLTAGE_PIN A3 // ZMPT101B 출력 (OPAMP 경유)
-#define CURRENT_PIN A4 // ACS712 출력
+// --- 핀 정의 (dropship_text (1).txt 기반) ---
+// SPI 핀 (공유)
+#define SPI_MOSI 11 // D11 (MOSI / T_DIN)
+#define SPI_MISO 12 // D12 (MISO / T_DO)
+#define SPI_SCK  13 // D13 (SCK / T_CLK)
 
-// --- [핀 수정] ---
-// D13은 SPI의 SCK로 사용해야 하므로 릴레이 핀을 D7로 변경합니다.
-#define RELAY_PIN 7    // 릴레이 모듈 제어 핀 (필수 Protection)
+// TFT 핀
+#define TFT_CS 10     // D10 (TFT CS)
+#define TFT_DC 9      // D9 (TFT DC)
+#define TFT_RST 8     // D8 (TFT RST)
 
-#define TFT_CS 10    // Chip Select (D10)
-#define TFT_DC 9     // Data/Command (D9)
-#define TFT_RST 8    // Reset (D8)
-// SPI 핀 (D11, D13)은 <SPI.h> 라이브러리에서 자동으로 관리됩니다.
+// Touch 핀
+#define TOUCH_CS 7      // D7 (T_CS)
+#define TOUCH_IRQ 6     // D6 (T_IRQ)
 
-// --- [피드백 8조] 부하 제어: PFC(역률개선) 릴레이 핀 ---
-#define PFC_RELAY_PIN 12 // (D12 핀 사용)
+// 릴레이 핀 (3개)
+#define RELAY_PIN_MAIN A2  // A2 (릴레이 0 신호 - 메인)
+#define RELAY_PIN_CH1  D4  // D4 (릴레이 1 신호 - Ch1 고우선순위)
+#define RELAY_PIN_CH2  D5  // D5 (릴레이 2 신호 - Ch2 저우선순위)
 
-// --- ADC 및 Timer 설정 상수 ---
-#define SAMPLE_PERIOD_MS 1   // 1ms (1kHz 샘플링 주파수)
-#define SAMPLES_PER_CALC 167 // 약 10주기 (RMS 계산 주기 @ 60Hz)
-#define FFT_SAMPLES 256      // FFT 샘플 수 (Nano R4 메모리에 최적화, 2^N) [cite: 1569-1571]
-#define MAX_CURRENT_LIMIT 7.0 // 릴레이 보호 전류 (A) (1500W/220V + 마진)
+// 센서 핀
+#define VOLTAGE_PIN A3 // A3 (전압센서 1)
+#define CURRENT_PIN_1 A4 // A4 (전류센서 1 - Ch1)
+#define CURRENT_PIN_2 A5 // A5 (전류센서 2 - Ch2)
 
-// --- [피드백 5,6조] 과도 전류 대응 ---
-#define OVERCURRENT_TRIP_CYCLES 3 // 이 횟수(약 0.5초)만큼 과전류 지속 시 차단
+// [NEW] Wi-Fi 모듈용 SoftwareSerial 핀
+// (D2가 TX, D3가 RX라고 명시됨)
+#define WIFI_RX_PIN 3  // Arduino RX(D3) <-> Wi-Fi TX
+#define WIFI_TX_PIN 2  // Arduino TX(D2) <-> Wi-Fi RX
 
-// --- [피드백 8조] 부하 제어 ---
-#define TARGET_PF 0.90 // 목표 역률 (이 값 미만일 때 PFC 릴레이 동작)
+// --- 채널 및 샘플링 설정 ---
+#define NUM_CHANNELS 2       
+#define SAMPLE_PERIOD_MS 1   
+#define SAMPLES_PER_CALC 167 
+#define FFT_SAMPLES 256      
 
-// --- !!! [중요] 교정 및 오프셋 계수 (Nano R4 14-bit ADC 기준) !!! ---
-// 이 값은 실제 회로 연결 후 반드시 재교정(Calibration)해야 합니다.
-const int V_OFFSET_ADC = 8192; // 2.5V (DC 오프셋 @ 14-bit)
-const int I_OFFSET_ADC = 8192; // 2.5V (DC 오프셋 @ 14-bit)
-const float K_V_REAL = 0.0431; // V_RMS/ADC_RMS 변환 계수 (발표자료 값) [cite: 1569-1571]
-const float K_I_REAL = 0.0305; // A_RMS/ADC_RMS 변환 계수 (발표자료 값) [cite: 1569-1571]
+// --- 퍼지 논리(경고) 및 부하 차단 임계값 (1500W 정격 기준) ---
+#define POWER_RECOVERY_W 1200.0  // 1200W 미만 시 저우선순위 부하 복구
+#define POWER_WARNING_W 1300.0   // 1300W 초과 시 '주의'
+#define POWER_CRITICAL_W 1500.0  // 1500W 초과 시 '위험' (정격) / 부하 차단 시작
+#define OVERLOAD_TRIP_CYCLES 3 
+
+// --- 교정 및 오프셋 계수 (Nano R4 14-bit ADC 기준) ---
+// !!! [중요] 이 값은 실제 회로 연결 후 반드시 재교정(Calibration)해야 합니다.
+const int V_OFFSET_ADC = 8192; 
+const int I_OFFSET_ADC_1 = 8192; 
+const int I_OFFSET_ADC_2 = 8192; 
+const float K_V_REAL = 0.0431; 
+const float K_I_REAL_1 = 0.0305; 
+const float K_I_REAL_2 = 0.0305; 
 
 // --- 객체 선언 ---
-FspTimer gpt_timer; // Nano R4 타이머 객체
+FspTimer gpt_timer;
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
+XPT2046_Touchscreen ts(TOUCH_CS); 
 ArduinoFFT<double> FFT;
+SoftwareSerial wifiSerial(WIFI_RX_PIN, WIFI_TX_PIN); // [NEW] (RX, TX)
 
-// --- 누적 및 버퍼 변수 (ISR에서 접근하므로 volatile) ---
+// SPI 설정 (TFT/Touch 공유용)
+SPISettings spiSettingsTFT(8000000, MSBFIRST, SPI_MODE0); 
+SPISettings spiSettingsTouch(2000000, MSBFIRST, SPI_MODE0); 
+
+// --- 다채널 누적 변수 (ISR 접근) ---
 volatile int sampleCount = 0;
 volatile float V_sq_sum = 0.0;
-volatile float I_sq_sum = 0.0;
-volatile float P_sum = 0.0;
+volatile float I_sq_sum[NUM_CHANNELS] = {0.0, 0.0};
+volatile float P_sum[NUM_CHANNELS] = {0.0, 0.0};
 volatile bool calculationReady = false;
 
 // --- FFT 버퍼 ---
@@ -80,440 +106,528 @@ double vReal[FFT_SAMPLES];
 double vImag[FFT_SAMPLES];
 int fft_count = 0;
 
-// --- [피드백 5,6조] 과도 전류 카운터 ---
-int overcurrent_counter = 0;
+// --- 부하 차단(Shedding) 상태 변수 ---
+volatile int overload_counter = 0;
+volatile bool protectionTripped_Critical = false; 
+volatile bool lowPriorityShed = false;          
 
-// --- [부가기능 3. 타이머] 변수 ---
-volatile unsigned long timerEndTime = 0; // 타이머 종료 시각 (0 = 비활성)
-volatile bool timerActive = false; // 타이머 동작 여부
-bool timerExpired = false; // 타이머 만료 플래그
+// --- 터치 좌표 변수 ---
+int touch_x, touch_y;
 
-// --- 시리얼 입력 버퍼 ---
-char serialBuffer[20];
-int bufferIndex = 0;
+// --- [NEW] Wi-Fi 전송 타이머 ---
+unsigned long lastWifiSend = 0;
+const long wifiSendInterval = 1000; // 1초 (1000ms)
+char jsonBuffer[256]; // JSON 문자열 버퍼
 
 // ==============================================================================
-// 1. 함수 프로토타입 선언 (Function Prototypes)
+// 1. 함수 프로토타입 선언
 // ==============================================================================
 void setup_timer_interrupt();
-void timer_ISR_routine(); // 실제 ADC 샘플링 ISR
-void setup_display();
-void display_power_values(float V_rms, float I_rms, float P_real, float Q_reactive, float PF, float THD);
-void relay_protection_check(float current);
-void load_control_check(float P_real, float Q_reactive, float PF);
+void timer_ISR_routine();
+void setup_display_and_touch();
+void checkTouchInput(); 
+void manageLoadPriorities(float P_total, float P_ch1); 
+void checkFuzzyWarnings(float totalPower);
 float calculate_THD();
-void check_serial_input();
-void check_timer_expire(); // [부가기능 3] 타이머 만료 체크 함수
+void sendDataToWifi(float V_rms, float P1, float I1, float P2, float I2, float P_total, float THD_val); // [NEW]
+
+// 화면별 출력 함수
+void displayMainScreen(float V_rms, float I_rms[], float P_real[], float Q_react[], float PF[], float P_total, float Q_total, float S_total, float PF_total, float THD);
+void displayWaveformScreen();
+void displayCriticalFaultScreen(const char* message); 
+void drawWaveform(int x, int y, int w, int h, double* data, int dataSize, uint16_t color);
+void drawTouchButtons();
 
 // ==============================================================================
 // 2. Setup 함수
 // ==============================================================================
 void setup() {
-  Serial.begin(115200);
-
-  // --- ADC 해상도 설정 (Nano R4: 14-bit) ---
-  analogReadResolution(14); // 0-16383 범위 [cite: 1530-1532, 1630-1632, 1754-1756]
-
-  // --- 릴레이 핀 초기화 ---
-  pinMode(RELAY_PIN, OUTPUT); // D7
-  digitalWrite(RELAY_PIN, HIGH); // 릴레이 초기 상태: HIGH (안전, NO 접점 가정)
+  Serial.begin(115200); // PC 시리얼 모니터
+  wifiSerial.begin(115200); // [NEW] Wi-Fi 모듈 통신
   
-  // --- [피드백 8조] PFC 릴레이 핀 초기화 ---
-  pinMode(PFC_RELAY_PIN, OUTPUT); // D12
-  digitalWrite(PFC_RELAY_PIN, LOW); // PFC 릴레이 초기 상태: LOW (OFF)
+  // --- ADC 해상도 설정 (Nano R4: 14-bit) ---
+  analogReadResolution(14);
 
-  // --- 디스플레이 설정 ---
-  // (참고: TFT_CS, TFT_DC, TFT_RST는 객체 생성 시 자동 설정되지만,
-  // SPI 핀(D11, D13)은 tft.begin() 호출 시 라이브러리가 자동 관리합니다.)
-  setup_display();
+  // --- 릴레이 핀 3개 초기화 (핀맵 기반) ---
+  pinMode(RELAY_PIN_MAIN, OUTPUT); 
+  pinMode(RELAY_PIN_CH1, OUTPUT); 
+  pinMode(RELAY_PIN_CH2, OUTPUT); 
+  
+  digitalWrite(RELAY_PIN_MAIN, HIGH); 
+  digitalWrite(RELAY_PIN_CH1, HIGH);
+  digitalWrite(RELAY_PIN_CH2, HIGH);
+  
+  // --- 디스플레이 및 터치 설정 ---
+  setup_display_and_touch();
 
   // --- 타이머 인터럽트 설정 (Nano R4) ---
   setup_timer_interrupt();
 
-#if (SERIAL_MODE_PLOTTER == 0)
-  Serial.println("--- Digital Wattmeter Initialized (Nano R4) ---");
-  Serial.println("--- [REAL HARDWARE MODE - V2 / Pin Fix] ---");
-  Serial.println("--- Main Relay moved to D7 ---");
-  Serial.println("--- 명령을 입력하세요 ---");
-  Serial.println("T,분 (예: T,10) - 타이머 설정");
-  Serial.println("C - 타이머 취소");
-  Serial.println("=========================================");
-  tft.println("System Initialized. (V2)");
-  tft.println("Relay -> D7");
-  
-  // (중요) 실제 교정 안내
-  Serial.println("!! 중요: V_OFFSET, I_OFFSET, K_V_REAL, K_I_REAL 값을 반드시 교정하세요.");
-  tft.setTextSize(1);
-  tft.setTextColor(ILI9341_YELLOW);
-  tft.setCursor(10, 220);
-  tft.println("WARNING: CALIBRATION REQUIRED!");
+  Serial.println("--- 다채널 전력계 초기화 완료 (v5.0 - WiFi 전송) ---");
+  tft.println("시스템 초기화 (v5.0)");
+  tft.println("Wi-Fi 전송 활성화 (D2,D3)");
   delay(2000);
-
-#else
-  Serial.println("--- Serial Plotter Mode ---");
-  Serial.println("V_inst, I_inst");
-#endif
 }
 
 // ==============================================================================
 // 3. Main Loop
 // ==============================================================================
 void loop() {
-  // 시리얼 입력 처리 (비차단 방식)
-#if (SERIAL_MODE_PLOTTER == 0)
-  check_serial_input();
-#endif
+  
+  // 치명적 오류(수동 리셋 필요) 상태인 경우
+  if (protectionTripped_Critical) {
+    displayCriticalFaultScreen("치명적 오류! 수동 리셋 필요");
+    checkTouchInput(); 
+    delay(500);
+    return;
+  }
+  
+  // 터치 입력 처리
+  checkTouchInput();
 
-  // [부가기능 3] 타이머 만료 여부 매번 확인
-  check_timer_expire();
-
+  // 계산 준비 플래그 확인
   if (calculationReady) {
-    // 1. 변수 안전 복사 및 초기화
     calculationReady = false;
-    // (중요) 인터럽트 비활성화 중에 변수를 복사하여 데이터 손상 방지
+
+    // 1. 변수 안전 복사 및 초기화
     noInterrupts();
     float temp_V_sq_sum = V_sq_sum;
-    float temp_I_sq_sum = I_sq_sum;
-    float temp_P_sum = P_sum;
     int temp_sampleCount = sampleCount;
-    
-    // ISR에서 다시 누적을 시작할 수 있도록 즉시 초기화
-    V_sq_sum = 0.0;
-    I_sq_sum = 0.0;
-    P_sum = 0.0;
-    sampleCount = 0;
-    interrupts(); // 인터럽트 재활성화
+    float temp_I_sq_sum[NUM_CHANNELS];
+    float temp_P_sum[NUM_CHANNELS];
+    for(int i=0; i<NUM_CHANNELS; i++) {
+        temp_I_sq_sum[i] = I_sq_sum[i];
+        temp_P_sum[i] = P_sum[i];
+        I_sq_sum[i] = 0.0; P_sum[i] = 0.0;
+    }
+    V_sq_sum = 0.0; sampleCount = 0;
+    interrupts();
 
-    // 2. RMS 계산 및 실제 물리량 변환 (필수기능: V, I)
+    // 2. RMS 계산 (전압은 공통)
     float V_rms_adc = sqrt(temp_V_sq_sum / temp_sampleCount);
-    float I_rms_adc = sqrt(temp_I_sq_sum / temp_sampleCount);
     float V_rms_real = V_rms_adc * K_V_REAL;
-    float I_rms_real = I_rms_adc * K_I_REAL;
+    if (V_rms_real < 50) V_rms_real = 0.0; // 노이즈 플로어 처리
 
-    // 3. 유효 전력 (P) 계산 (필수기능: P)
-    float P_avg_real = (temp_P_sum / temp_sampleCount) * K_V_REAL * K_I_REAL;
+    // 3. 채널별 RMS, P, S, Q, PF 계산
+    float I_rms_real[NUM_CHANNELS];
+    float P_avg_real[NUM_CHANNELS];
+    float S_apparent[NUM_CHANNELS];
+    float PF[NUM_CHANNELS];
+    float Q_reactive[NUM_CHANNELS];
+    float P_total = 0.0;
+    float Q_total = 0.0;
 
-    // 4. 피상 전력 (S), 역률 (PF), 무효 전력 (Q) 계산 (부가기능 1. 무효전력)
-    float S_apparent = V_rms_real * I_rms_real;
-    float PF = (S_apparent != 0.0) ? (P_avg_real / S_apparent) : 0.0;
+    // Ch 1 (A4)
+    float I_rms_adc_1 = sqrt(temp_I_sq_sum[0] / temp_sampleCount);
+    I_rms_real[0] = I_rms_adc_1 * K_I_REAL_1;
+    if (I_rms_real[0] < 0.03) I_rms_real[0] = 0.0; // 노이즈 플로어
+    P_avg_real[0] = (temp_P_sum[0] / temp_sampleCount) * K_V_REAL * K_I_REAL_1;
+    S_apparent[0] = V_rms_real * I_rms_real[0];
+    if (S_apparent[0] < 0.1) S_apparent[0] = 0.0; // 노이즈 플로어
+    if (P_avg_real[0] > S_apparent[0] || S_apparent[0] == 0.0) P_avg_real[0] = S_apparent[0];
+    PF[0] = (S_apparent[0] != 0.0) ? (P_avg_real[0] / S_apparent[0]) : 1.0;
+    if (PF[0] > 1.0) PF[0] = 1.0; if (PF[0] < -1.0) PF[0] = -1.0;
+    Q_reactive[0] = (S_apparent[0] * S_apparent[0]) - (P_avg_real[0] * P_avg_real[0]);
+    Q_reactive[0] = (Q_reactive[0] > 0) ? sqrt(Q_reactive[0]) : 0;
+    if (I_rms_real[0] > 0.03 && P_avg_real[0] < 0.1) Q_reactive[0] = S_apparent[0]; // 순수 무효전력
+
+    // Ch 2 (A5)
+    float I_rms_adc_2 = sqrt(temp_I_sq_sum[1] / temp_sampleCount);
+    I_rms_real[1] = I_rms_adc_2 * K_I_REAL_2;
+    if (I_rms_real[1] < 0.03) I_rms_real[1] = 0.0; // 노이즈 플로어
+    P_avg_real[1] = (temp_P_sum[1] / temp_sampleCount) * K_V_REAL * K_I_REAL_2;
+    S_apparent[1] = V_rms_real * I_rms_real[1];
+    if (S_apparent[1] < 0.1) S_apparent[1] = 0.0; // 노이즈 플로어
+    if (P_avg_real[1] > S_apparent[1] || S_apparent[1] == 0.0) P_avg_real[1] = S_apparent[1];
+    PF[1] = (S_apparent[1] != 0.0) ? (P_avg_real[1] / S_apparent[1]) : 1.0;
+    if (PF[1] > 1.0) PF[1] = 1.0; if (PF[1] < -1.0) PF[1] = -1.0;
+    Q_reactive[1] = (S_apparent[1] * S_apparent[1]) - (P_avg_real[1] * P_avg_real[1]);
+    Q_reactive[1] = (Q_reactive[1] > 0) ? sqrt(Q_reactive[1]) : 0;
+    if (I_rms_real[1] > 0.03 && P_avg_real[1] < 0.1) Q_reactive[1] = S_apparent[1];
+
+    // 4. 총계 계산
+    P_total = P_avg_real[0] + P_avg_real[1];
+    Q_total = Q_reactive[0] + Q_reactive[1];
+    float S_total_vector = sqrt(P_total * P_total + Q_total * Q_total);
+    float PF_total = (S_total_vector != 0.0) ? (P_total / S_total_vector) : 1.0;
+
+    // 5. THD 계산
+    float THD_value = calculate_THD();
+
+    // 6. 우선순위 부하 차단/관리 로직 실행
+    manageLoadPriorities(P_total, P_avg_real[0]);
+
+    // 7. 현재 화면 상태에 따라 다른 내용 출력
+    tft.fillScreen(ILI9341_BLACK);
     
-    if (PF > 1.0) PF = 1.0;
-    if (PF < -1.0) PF = -1.0;
+    switch(currentScreen) {
+      case SCREEN_MAIN_POWER:
+        displayMainScreen(V_rms_real, I_rms_real, P_avg_real, Q_reactive, PF, P_total, Q_total, S_total_vector, PF_total, THD_value);
+        break;
+      case SCREEN_WAVEFORM:
+        displayWaveformScreen();
+        break;
+      case SCREEN_FAULT:
+        displayCriticalFaultScreen("치명적 오류 발생");
+        break;
+    }
     
-    float Q_reactive = S_apparent * sin(acos(PF));
+    // 8. 퍼지 경고 확인 (데이터 출력 후 상단에 덮어쓰기)
+    checkFuzzyWarnings(P_total); 
+    drawTouchButtons(); // 공통 버튼 그리기
 
-    // 5. THD 계산 (부가기능 5. THD)
-    float THD_value = calculate_THD(); // 윈도잉 기능이 내장됨
+    // 9. [NEW] 1초마다 Wi-Fi 모듈로 JSON 데이터 전송
+    unsigned long now = millis();
+    if (now - lastWifiSend > wifiSendInterval) {
+      lastWifiSend = now;
+      sendDataToWifi(V_rms_real, 
+                     P_avg_real[0], I_rms_real[0], 
+                     P_avg_real[1], I_rms_real[1], 
+                     P_total, THD_value);
+    }
 
-#if (SERIAL_MODE_PLOTTER == 0)
-    // 6. 결과 출력 (TFT 및 시리얼 모니터)
-    display_power_values(V_rms_real, I_rms_real, P_avg_real, Q_reactive, PF, THD_value);
-    
-    // 7. 릴레이 보호 로직 실행 (부가기능 4. Protection)
-    relay_protection_check(I_rms_real);
-    
-    // 8. [피드백 8조] 부하 제어 로직 실행
-    load_control_check(P_avg_real, Q_reactive, PF);
-#endif
-
-    // 9. FFT 카운터 초기화
+    // 10. FFT 카운터 초기화
     fft_count = 0;
   }
 }
 
 // ==============================================================================
-// 4. ISR 및 보조 함수 (Actual Hardware)
+// 5. ISR 및 보조 함수 (기존 v4와 대부분 동일)
 // ==============================================================================
 
 /**
  * @brief Nano R4용 FspTimer 설정
  */
 void setup_timer_interrupt() {
-  // gpt_timer (FspTimer 객체) 설정
   gpt_timer.begin(TIMER_MODE_PERIODIC, GPT_TIMER_CH0, (SAMPLE_PERIOD_MS * 1000), MICROSECONDS);
-  // 인터럽트 콜백 함수 지정
   gpt_timer.setCallback(timer_ISR_routine);
-  // 타이머 시작
   gpt_timer.start();
 }
 
 /**
- * @brief 1ms 타이머 인터럽트 서비스 루틴 (실제 ADC 샘플링용)
+ * @brief 1ms 타이머 ISR (다채널 샘플링)
  */
 void timer_ISR_routine() {
-  if (calculationReady && SERIAL_MODE_PLOTTER == 0) return;
-
-  // 1. ADC 동기 샘플링 (14-bit)
-  int V_raw = analogRead(VOLTAGE_PIN);
-  int I_raw = analogRead(CURRENT_PIN);
-
-  // 2. DC 옵셋 제거 (AC 성분 추출)
+  if (calculationReady) return;
+  int V_raw = analogRead(VOLTAGE_PIN);   
+  int I_raw_1 = analogRead(CURRENT_PIN_1); 
+  int I_raw_2 = analogRead(CURRENT_PIN_2); 
   float V_ac = (float)(V_raw - V_OFFSET_ADC);
-  float I_ac = (float)(I_raw - I_OFFSET_ADC);
-
-#if (SERIAL_MODE_PLOTTER == 1)
-  // --- 플로터 모드 --- (부가기능 2. 파형 표시)
-  Serial.print(V_ac * K_V_REAL * 1.41421); // V_inst (추정치)
-  Serial.print(",");
-  Serial.println(I_ac * K_I_REAL * 1.41421); // I_inst (추정치)
-
-#else
-  // --- 전력 계산 모드 ---
-  // 3. RMS 및 유효 전력(P) 계산 누적
+  float I_ac_1 = (float)(I_raw_1 - I_OFFSET_ADC_1);
+  float I_ac_2 = (float)(I_raw_2 - I_OFFSET_ADC_2);
   V_sq_sum += V_ac * V_ac;
-  I_sq_sum += I_ac * I_ac;
-  P_sum    += V_ac * I_ac;
-
-  // 4. FFT 버퍼 저장 (부가기능 5. THD)
+  I_sq_sum[0] += I_ac_1 * I_ac_1;
+  P_sum[0]    += V_ac * I_ac_1;
+  I_sq_sum[1] += I_ac_2 * I_ac_2;
+  P_sum[1]    += V_ac * I_ac_2;
   if (fft_count < FFT_SAMPLES) {
     vReal[fft_count] = (double)V_ac;
-    vImag[fft_count] = 0; // 허수부는 0
+    vImag[fft_count] = 0;
   }
   fft_count++;
   sampleCount++;
-
-  // 5. 샘플링 횟수 도달 확인
   if (sampleCount >= SAMPLES_PER_CALC) {
     calculationReady = true;
   }
-#endif
 }
 
 /**
- * @brief [부가기능 3] 타이머 만료 체크
- * Arduino의 millis() 함수를 기준으로 타이머가 만료되었는지 확인
+ * @brief ILI9341 디스플레이 및 XPT2046 터치 초기 설정
  */
-void check_timer_expire() {
-  if (timerActive && millis() >= timerEndTime) {
-    timerActive = false;
-    timerExpired = true; // 만료 플래그 설정
-    
-    if (SERIAL_MODE_PLOTTER == 0) {
-      Serial.println("******************************************");
-      Serial.println("!! TIMER EXPIRED !!");
-      Serial.println("******************************************");
-    }
-  }
-}
-
-/**
- * @brief 시리얼 모니터로 사용자 입력(T, C) 받기
- */
-void check_serial_input() {
-  while (Serial.available() > 0) {
-    char c = Serial.read();
-    if (c == '\n' || c == '\r') { // 입력 완료 (Enter)
-      if (bufferIndex > 0) {
-        serialBuffer[bufferIndex] = '\0'; // 문자열 종료
-        
-        // --- [부가기능 3] 타이머 설정 명령 (T,분) ---
-        if (serialBuffer[0] == 'T' || serialBuffer[0] == 't') {
-          char* token = strtok(serialBuffer, ",");
-          token = strtok(NULL, ","); // "분" 값 가져오기
-          if (token != NULL) {
-            int minutes = atoi(token);
-            if (minutes > 0) {
-              unsigned long durationMs = (unsigned long)minutes * 60 * 1000;
-              timerEndTime = millis() + durationMs; // 현재 시간 기준
-              timerActive = true;
-              timerExpired = false; // 새 타이머 시작 시 만료 플래그 리셋
-              
-              Serial.print("\n[타이머 설정] ");
-              Serial.print(minutes);
-              Serial.println("분 타이머 시작.");
-            } else {
-              Serial.println("오류: 유효하지 않은 시간입니다.");
-            }
-          }
-        } 
-        // --- [부가기능 3] 타이머 취소 명령 (C) ---
-        else if (serialBuffer[0] == 'C' || serialBuffer[0] == 'c') {
-          timerActive = false;
-          timerExpired = false;
-          timerEndTime = 0;
-          Serial.println("\n[타이머 취소] 타이머가 비활성화되었습니다.");
-        } else {
-          Serial.println("오류: 알 수 없는 명령입니다. (T,분 또는 C 입력)");
-        }
-        
-        bufferIndex = 0; // 버퍼 초기화
-      }
-    } else if (bufferIndex < 19) {
-      serialBuffer[bufferIndex++] = c;
-    }
-  }
-}
-
-/**
- * @brief ILI9341 디스플레이 초기 설정
- */
-void setup_display() {
+void setup_display_and_touch() {
   tft.begin();
-  tft.setRotation(3); // 가로 모드 (필요에 따라 1 또는 3)
+  tft.setRotation(3); // 가로 모드 (320x240)
   tft.fillScreen(ILI9341_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(ILI9341_WHITE);
   tft.setCursor(10, 10);
-  tft.println("Digital Wattmeter Ready");
+  tft.println("TFT OK");
+
+  ts.begin(spiSettingsTouch); 
+  ts.setRotation(3); 
+  tft.println("Touch OK");
+  delay(1000);
 }
 
 /**
- * @brief 전력 측정 값을 시리얼 모니터 및 TFT LCD에 출력
+ * @brief 터치 입력 확인 및 화면 상태 변경
  */
-void display_power_values(float V_rms, float I_rms, float P_real, float Q_reactive, float PF, float THD) {
-  // --- 1. 시리얼 모니터 출력 ---
-  Serial.println("--- Measurement Results ---");
-  Serial.print("  V_rms: \t"); Serial.print(V_rms, 2); Serial.println(" V");
-  Serial.print("  I_rms: \t"); Serial.print(I_rms, 3); Serial.println(" A");
-  Serial.print("  P_real: \t"); Serial.print(P_real, 2); Serial.println(" W");
-  Serial.print("  Q_react: \t"); Serial.print(Q_reactive, 2); Serial.println(" VAR"); // 부가기능 1
-  Serial.print("  PF: \t\t"); Serial.println(PF, 3);
-  Serial.print("  THD_V: \t"); Serial.print(THD, 2); Serial.println(" % (Hann Window)"); // 부가기능 5
-  Serial.println("---------------------------");
+void checkTouchInput() {
+  if (protectionTripped_Critical) {
+    currentScreen = SCREEN_FAULT;
+    return;
+  }
 
-  // --- 2. TFT LCD 출력 ---
-  tft.fillScreen(ILI9341_BLACK);
-  tft.setTextSize(2);
+  SPI.beginTransaction(spiSettingsTouch); 
+  bool touched = ts.touched();
+  SPI.endTransaction();
 
-  // V_RMS 출력 (필수)
-  tft.setCursor(10, 40); tft.setTextColor(ILI9341_WHITE); tft.print("V: ");
-  tft.setTextColor(ILI9341_CYAN); tft.print(V_rms, 2); tft.println(" V");
+  if (touched) {
+    SPI.beginTransaction(spiSettingsTouch);
+    TS_Point p = ts.getPoint();
+    SPI.endTransaction();
 
-  // I_RMS 출력 (필수)
-  tft.setCursor(10, 70); tft.setTextColor(ILI9341_WHITE); tft.print("I: ");
-  tft.setTextColor(ILI9341_YELLOW); tft.print(I_rms, 3); tft.println(" A");
+    // 터치 좌표 보정 (TFT.setRotation(3) - 320x240 기준)
+    // 이 값은 실제 하드웨어에 맞게 보정(calibrate)이 필요합니다.
+    touch_x = map(p.y, 200, 3800, 0, 320); 
+    touch_y = map(p.x, 300, 3800, 0, 240); 
+    touch_y = 240 - touch_y; 
 
-  // P_REAL 출력 (필수)
-  tft.setCursor(10, 100); tft.setTextColor(ILI9341_WHITE); tft.print("P: ");
-  tft.setTextColor(ILI9341_GREEN); tft.print(P_real, 2); tft.println(" W");
+    touch_x = constrain(touch_x, 0, 320);
+    touch_y = constrain(touch_y, 0, 240);
 
-  // Q_REACT 출력 (부가기능 1)
-  tft.setCursor(10, 130); tft.setTextColor(ILI9341_WHITE); tft.print("Q: ");
-  tft.setTextColor(ILI9341_MAGENTA); tft.print(Q_reactive, 2); tft.println(" VAR");
+    Serial.print("터치: X="); Serial.print(touch_x); Serial.print(", Y="); Serial.println(touch_y);
 
-  // PF 출력
-  tft.setCursor(10, 160); tft.setTextColor(ILI9341_WHITE); tft.print("PF: ");
-  tft.setTextColor(ILI9341_RED); tft.println(PF, 3);
-
-  // THD 출력 (부가기능 5)
-  tft.setCursor(10, 190); tft.setTextColor(ILI9341_WHITE); tft.print("THD: ");
-  tft.setTextColor(ILI9341_ORANGE); tft.print(THD, 2); tft.println(" %");
-}
-
-/**
- * @brief [부가기능 4. Protection] 과전류 보호 로직 (과도 전류 대응)
- */
-void relay_protection_check(float current) {
-  static bool protectionTripped = false; // 과전류로 인한 차단 상태 기억
-  
-  if (current > MAX_CURRENT_LIMIT) {
-    // 과전류 감지, 카운터 증가
-    overcurrent_counter++;
-    
-    // 시리얼 및 TFT에 경고 출력
-    char buffer[50];
-    sprintf(buffer, "WARN: OC Count: %d/%d", overcurrent_counter, OVERCURRENT_TRIP_CYCLES);
-    Serial.println(buffer);
-    
-    tft.setCursor(10, 220);
-    tft.setTextColor(ILI9341_ORANGE);
-    tft.setTextSize(2);
-    tft.println(buffer);
-
-    // 카운터가 설정된 트립 횟수에 도달하면 (과전류가 지속되면) 릴레이 차단
-    if (overcurrent_counter >= OVERCURRENT_TRIP_CYCLES) {
-      protectionTripped = true; // 차단 상태 Latch
-      digitalWrite(RELAY_PIN, LOW); // 릴레이 동작 (차단)
-      Serial.println("******************************************");
-      Serial.println("!! OVERCURRENT FAULT (Persistent) !!");
-      Serial.print("!! RELAY (Pin D"); Serial.print(RELAY_PIN); Serial.println(") TRIPPED (OFF) !!");
-      Serial.println("******************************************");
-
-      // TFT에 영구적인 오류 메시지 표시
-      tft.fillScreen(ILI9341_RED);
-      tft.setCursor(40, 100);
-      tft.setTextColor(ILI9341_WHITE);
-      tft.setTextSize(3);
-      tft.println("OVERCURRENT FAULT");
-      tft.setCursor(80, 140);
-      tft.println("RELAY OFF");
-    }
-    
-  } else {
-    // 전류가 정상 범위일 때
-    overcurrent_counter = 0;
-    
-    // (참고) 실제 제품에서는 과전류가 해소되어도 자동으로 복구되면 안 됨.
-    // 여기서는 테스트 편의를 위해 자동으로 Latch 해제
-    if (protectionTripped) {
-      protectionTripped = false;
-      Serial.println("...Overcurrent fault auto-reset.");
-    }
-    
-    // 과전류 트립 상태가 아닐 때만 타이머 상태 확인
-    if (!protectionTripped) {
-      if (timerExpired) {
-        // [부가기능 3] 타이머가 만료되었으면 릴레이 OFF
-        digitalWrite(RELAY_PIN, LOW);
-        Serial.print("RELAY (Pin D"); Serial.print(RELAY_PIN); Serial.println(") OFF - Timer Expired");
-        
-        // TFT에 타이머 만료 표시
-        tft.setCursor(10, 220);
-        tft.setTextColor(ILI9341_RED);
-        tft.setTextSize(2);
-        tft.println("TIMER EXPIRED - RELAY OFF");
-
-      } else {
-        // 정상 상태 (타이머가 동작 중이거나, 설정되지 않았음)
-        digitalWrite(RELAY_PIN, HIGH); 
-        Serial.print("RELAY (Pin D"); Serial.print(RELAY_PIN); Serial.println(") ON - Normal");
+    if (touch_y > 200) { 
+      if (touch_x > 0 && touch_x < 160) {
+        if (currentScreen != SCREEN_MAIN_POWER) {
+          currentScreen = SCREEN_MAIN_POWER;
+          Serial.println("화면 -> 메인");
+        }
+      } else if (touch_x > 160 && touch_x < 320) {
+         if (currentScreen != SCREEN_WAVEFORM) {
+          currentScreen = SCREEN_WAVEFORM;
+          Serial.println("화면 -> 파형");
+         }
       }
     }
+    delay(100); // 디바운싱
   }
 }
 
 /**
- * @brief [피드백 8조] 부하 자동 제어 (역률 개선) 로직
+ * @brief [NEW] Wi-Fi 모듈로 JSON 데이터 전송
  */
-void load_control_check(float P_real, float Q_reactive, float PF) {
-  // 유효전력이 10W 이상이고(의미있는 부하), 역률이 목표치(0.9)보다 낮고, 
-  // 무효전력이 0보다 큰(유도성 부하, 지상역률) 경우
-  if (P_real > 10.0 && PF < TARGET_PF && Q_reactive > 0.0) {
-    digitalWrite(PFC_RELAY_PIN, HIGH); // PFC 릴레이 ON (커패시터 투입)
-    Serial.println("[LOAD_CONTROL] Low PF (Inductive) detected. PFC Relay (Pin 12) ON.");
+void sendDataToWifi(float V_rms, float P1, float I1, float P2, float I2, float P_total, float THD_val) {
+  // JSON 문자열 생성
+  sprintf(jsonBuffer, 
+    "{\"v\":%.1f,\"p1\":%.1f,\"i1\":%.2f,\"p2\":%.1f,\"i2\":%.2f,\"pt\":%.1f,\"thd\":%.1f,\"shed\":%s,\"fault\":%s}",
+    V_rms,
+    P1, I1,
+    P2, I2,
+    P_total,
+    THD_val,
+    lowPriorityShed ? "true" : "false",
+    protectionTripped_Critical ? "true" : "false"
+  );
+  
+  // SoftwareSerial (D2/D3)을 통해 전송
+  wifiSerial.println(jsonBuffer);
+  
+  // PC 모니터에도 동일하게 출력
+  Serial.print("WIFI_TX (D2): ");
+  Serial.println(jsonBuffer);
+}
+
+
+/**
+ * @brief 화면 하단에 공통 버튼 그리기
+ */
+void drawTouchButtons() {
+  if (currentScreen == SCREEN_FAULT) return;
+  tft.setTextSize(2);
+  if (currentScreen == SCREEN_MAIN_POWER) {
+    tft.fillRect(10, 210, 140, 30, ILI9341_GREEN);
+    tft.setTextColor(ILI9341_BLACK);
   } else {
-    digitalWrite(PFC_RELAY_PIN, LOW); // 그 외의 경우 PFC 릴레이 OFF
-    Serial.println("[LOAD_CONTROL] PF OK. PFC Relay (Pin 12) OFF.");
+    tft.drawRect(10, 210, 140, 30, ILI9341_GREEN);
+    tft.setTextColor(ILI9341_GREEN);
+  }
+  tft.setCursor(50, 217); tft.print("전력");
+
+  if (currentScreen == SCREEN_WAVEFORM) {
+    tft.fillRect(170, 210, 140, 30, ILI9341_CYAN);
+    tft.setTextColor(ILI9341_BLACK);
+  } else {
+    tft.drawRect(170, 210, 140, 30, ILI9341_CYAN);
+    tft.setTextColor(ILI9341_CYAN);
+  }
+  tft.setCursor(210, 217); tft.print("파형");
+}
+
+
+/**
+ * @brief 메인 전력 값 화면 표시
+ */
+void displayMainScreen(float V_rms, float I_rms[], float P_real[], float Q_react[], float PF[], 
+                         float P_total, float Q_total, float S_total, float PF_total, float THD) {
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+
+  // 1. 공통 전압
+  tft.setCursor(10, 30); tft.print("전압:");
+  tft.setTextColor(ILI9341_CYAN); tft.print(V_rms, 2); tft.println(" V");
+
+  // 2. 총계
+  tft.setCursor(160, 30); tft.setTextColor(ILI9341_WHITE); tft.print("총전력:");
+  tft.setTextColor(ILI9341_GREEN); tft.print(P_total, 2); tft.println(" W");
+  tft.setCursor(160, 55); tft.setTextColor(ILI9341_WHITE); tft.print("총피상:");
+  tft.print(S_total, 2); tft.println(" VA");
+  tft.setCursor(10, 55); tft.setTextColor(ILI9341_WHITE); tft.print("총역률:");
+  tft.setTextColor(ILI9341_RED); tft.println(PF_total, 3);
+  tft.setCursor(10, 80); tft.setTextColor(ILI9341_WHITE); tft.print("THD:");
+  tft.setTextColor(ILI9341_ORANGE); tft.print(THD, 2); tft.println(" %");
+
+  // 3. 채널 1 (A4) - 고우선순위
+  tft.drawFastHLine(10, 110, 300, ILI9341_DARKGREY);
+  tft.setCursor(10, 120); tft.setTextColor(ILI9341_WHITE); tft.print("Ch1(고) I:");
+  tft.setTextColor(ILI9341_YELLOW); tft.print(I_rms[0], 3); tft.println(" A");
+  tft.setCursor(160, 120); tft.setTextColor(ILI9341_WHITE); tft.print("P:");
+  tft.setTextColor(ILI9341_YELLOW); tft.print(P_real[0], 2); tft.println(" W");
+
+  // 4. 채널 2 (A5) - 저우선순위
+  tft.drawFastHLine(10, 150, 300, ILI9341_DARKGREY);
+  tft.setCursor(10, 160); tft.setTextColor(ILI9341_WHITE); tft.print("Ch2(저) I:");
+  
+  if(lowPriorityShed) { // 저우선순위 부하가 차단되었다면
+    tft.setTextColor(ILI9341_DARKGREY); 
+    tft.print("--- (차단됨) ---");
+  } else {
+    tft.setTextColor(ILI9341_MAGENTA);
+    tft.print(I_rms[1], 3); tft.println(" A");
+    tft.setCursor(160, 160); tft.setTextColor(ILI9341_WHITE); tft.print("P:");
+    tft.setTextColor(ILI9341_MAGENTA); tft.print(P_real[1], 2); tft.println(" W");
+  }
+}
+
+/**
+ * @brief 전압 파형 표시 화면
+ */
+void displayWaveformScreen() {
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_CYAN);
+  tft.setCursor(10, 10);
+  tft.println("전압 파형 (FFT 버퍼)");
+  drawWaveform(10, 40, 300, 160, vReal, FFT_SAMPLES, ILI9341_CYAN);
+}
+
+/**
+ * @brief 치명적 오류(Fault) 화면 표시
+ */
+void displayCriticalFaultScreen(const char* message) {
+  tft.fillScreen(ILI9341_RED);
+  tft.setCursor(40, 100);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(3);
+  tft.println(message);
+  tft.setTextSize(2);
+  tft.setCursor(80, 140);
+  tft.println("모든 릴레이 차단");
+}
+
+
+/**
+ * @brief TFT에 파형을 그리는 헬퍼 함수
+ */
+void drawWaveform(int x, int y, int w, int h, double* data, int dataSize, uint16_t color) {
+  tft.drawRect(x, y, w, h, ILI9341_WHITE); 
+  double maxVal = -99999.0, minVal = 99999.0;
+  for (int i = 0; i < dataSize; i++) {
+    if (data[i] > maxVal) maxVal = data[i];
+    if (data[i] < minVal) minVal = data[i];
+  }
+  if (maxVal < 1000) maxVal = 8192;
+  if (minVal > -1000) minVal = -8192;
+  double yRange = maxVal - minVal;
+  if (yRange == 0) yRange = 1; 
+  int lastX = -1, lastY = -1;
+  for (int i = 0; i < dataSize; i++) {
+    int px = x + (int)((float)i * (float)w / (float)dataSize);
+    int py = y + (int)(h * (maxVal - data[i]) / yRange);
+    if (lastX != -1) tft.drawLine(lastX, lastY, px, py, color);
+    lastX = px; lastY = py;
   }
 }
 
 
 /**
- * @brief [부가기능 5. THD] FFT를 사용하여 전압 파형의 THD 계산
- * @return THD 값 (%)
+ * @brief 퍼지 논리(단순 임계값) 기반 경고
+ */
+void checkFuzzyWarnings(float totalPower) {
+  if (protectionTripped_Critical) return; // 치명적 오류 시 상단바 표시 안함 (전체 화면 붉음)
+  
+  if (totalPower > POWER_CRITICAL_W) {
+    tft.fillRect(0, 0, 320, 25, ILI9341_RED); 
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_WHITE);
+    tft.setCursor(40, 5);
+    tft.println("!! 위험 전력 초과 !!");
+    Serial.println("!! 위험 전력 초과 !!");
+  } else if (totalPower > POWER_WARNING_W) {
+    tft.fillRect(0, 0, 320, 25, ILI9341_ORANGE); 
+    tft.setTextSize(2);
+    tft.setTextColor(ILI9341_BLACK);
+    tft.setCursor(40, 5);
+    tft.println("! 경고: 높은 전력 !");
+    Serial.println("! 경고: 높은 전력 !");
+  }
+}
+
+
+/**
+ * @brief 우선순위 기반 부하 차단(Shedding) 및 관리
+ */
+void manageLoadPriorities(float P_total, float P_ch1) {
+  
+  if (protectionTripped_Critical) return;
+
+  // --- 시나리오 2: 치명적 오류 (고우선순위 부하 단독 초과) ---
+  if (P_ch1 > POWER_CRITICAL_W) {
+    overload_counter++;
+    if (overload_counter >= OVERLOAD_TRIP_CYCLES) {
+      protectionTripped_Critical = true; // 되돌릴 수 없는 차단
+      digitalWrite(RELAY_PIN_MAIN, LOW); 
+      digitalWrite(RELAY_PIN_CH1, LOW);  
+      digitalWrite(RELAY_PIN_CH2, LOW);  
+      Serial.println("!! 치명적 오류: Ch 1 (고우선순위) 부하가 정격을 초과했습니다. 모든 릴레이 차단.");
+      currentScreen = SCREEN_FAULT; 
+    }
+  } 
+  // --- 시나리오 1: 경미한 오류 (총 부하 초과) ---
+  else if (P_total > POWER_CRITICAL_W) {
+    overload_counter++;
+    if (overload_counter >= OVERLOAD_TRIP_CYCLES) {
+      if (!lowPriorityShed) { 
+        digitalWrite(RELAY_PIN_CH2, LOW); // 저우선순위(Ch2)만 차단
+        lowPriorityShed = true;
+        Serial.println("!! 부하 차단: 총 전력 초과. Ch 2 (저우선순위)를 차단합니다.");
+      }
+      overload_counter = 0; 
+    }
+  } 
+  // --- 시나리오 3: 복구 (안전 임계값 미만) ---
+  else if (P_total < POWER_RECOVERY_W) { // 1200W 미만 (Hysteresis)
+    overload_counter = 0;
+    if (lowPriorityShed) { 
+      lowPriorityShed = false;
+      digitalWrite(RELAY_PIN_CH2, HIGH); // 저우선순위(Ch2) 복구
+      Serial.println("...전력 안전. Ch 2 (저우선순위)를 복구합니다.");
+    }
+  } 
+  // --- 경고 상태 (WARNING ~ CRITICAL 사이) ---
+  else {
+    overload_counter = 0; 
+  }
+}
+
+
+/**
+ * @brief THD 계산 함수
  */
 float calculate_THD() {
   if (fft_count < FFT_SAMPLES) return 0.0;
-
-  // [피드백 7조] 스펙트럼 누설(Leakage) 방지를 위해 HANN 윈도잉 적용
+  
+  SPI.beginTransaction(spiSettingsTFT);
   FFT.windowing(vReal, FFT_SAMPLES, FFT_WIN_TYP_HANN, FFT_FORWARD);
-
-  // 1. FFT 수행
-  FFT.compute(vReal, vImag, FFT_SAMPLES, FFT_FORWARD); 
-  // 2. 복소수를 크기(Magnitude)로 변환
-  FFT.complexToMagnitude(vReal, vImag, FFT_SAMPLES); 
-
-  // 3. 기본파 (60Hz) 주파수 인덱스 찾기
-  // 샘플링 주파수 = 1000Hz, FFT 샘플 수 = 256
-  // 해상도 = 1000 / 256 = 3.90625 Hz/인덱스
-  int fundamental_idx = (int)(FREQUENCY / (1000.0 / FFT_SAMPLES) + 0.5); // 60 / 3.90625 ≈ 15.36 -> 15
-
-  // 4. THD 계산
+  FFT.compute(vReal, vImag, FFT_SAMPLES, FFT_FORWARD);
+  FFT.complexToMagnitude(vReal, vImag, FFT_SAMPLES);
+  SPI.endTransaction();
+  
+  int fundamental_idx = (int)(60.0 / (1000.0 / FFT_SAMPLES) + 0.5); 
   float fundamental_mag = vReal[fundamental_idx];
   float harmonic_sq_sum = 0.0;
 
-  // DC 성분(0)과 기본파(fundamental_idx)를 제외한 고조파 성분 제곱 합산
-  for (int i = 1; i < FFT_SAMPLES / 2; i++) { // i=1 부터 시작 (DC 제외)
+  for (int i = 2; i < FFT_SAMPLES / 2; i++) { 
     if (i != fundamental_idx) {
       harmonic_sq_sum += vReal[i] * vReal[i];
     }
@@ -523,6 +637,5 @@ float calculate_THD() {
   if (fundamental_mag > 0.0) {
       THD = (sqrt(harmonic_sq_sum) / fundamental_mag) * 100.0;
   }
-  
   return THD;
 }
