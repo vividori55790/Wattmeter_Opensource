@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>실시간 전력 계통 감시 (SCADA)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        // Firebase SDK 가져오기
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, onSnapshot, setDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // --- Firebase 설정 ---
+        // Canvas 환경 변수 로드
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let db, auth, userId;
+        let wattmeterDocRef;
+        let currentData = {}; // [NEW] AI가 참조할 현재 데이터 저장용
+
+        // 로그 함수
+        const logEl = document.getElementById('system-log');
+        function logMessage(message) {
+            console.log(message);
+            if (logEl) {
+                logEl.value += `[${new Date().toLocaleTimeString()}] ${message}\n`;
+                logEl.scrollTop = logEl.scrollHeight;
+            }
+        }
+
+        // [NEW] AI 모달창 표시 헬퍼
+        function showModal(title, content) {
+            const modal = document.getElementById('gemini-modal');
+            document.getElementById('gemini-modal-title').textContent = title;
+            document.getElementById('gemini-modal-content').innerHTML = content.replace(/\n/g, '<br>');
+            modal.classList.remove('hidden');
+        }
+
+        // [NEW] Core Gemini API 호출 함수
+        async function callGemini(systemPrompt, userQuery) {
+            const apiKey = ""; // API 키는 Canvas에서 자동으로 처리합니다.
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            try {
+                // API 호출 (지수 백오프 재시도 구현)
+                let response;
+                let retries = 0;
+                const maxRetries = 5;
+                while (retries < maxRetries) {
+                    response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (response.ok) {
+                        break; // 성공
+                    }
+
+                    if (response.status === 429 || response.status >= 500) {
+                        retries++;
+                        const delay = Math.pow(2, retries) * 1000 + Math.random() * 1000;
+                        logMessage(`Gemini API 맵을 초과(429) 또는 서버 오류. ${delay.toFixed(0)}ms 후 재시도... (${retries}/${maxRetries})`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                    } else {
+                        // 429 또는 5xx가 아닌 다른 오류는 즉시 실패 처리
+                        throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                    }
+                }
+                
+                if (!response.ok) {
+                     throw new Error(`API 재시도 실패: ${response.status} ${response.statusText}`);
+                }
+
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+                
+                if (candidate && candidate.content?.parts?.[0]?.text) {
+                    return candidate.content.parts[0].text;
+                } else {
+                    logMessage("Gemini 응답 파싱 오류: " + JSON.stringify(result));
+                    return "AI로부터 유효한 응답을 받지 못했습니다. (No valid text)";
+                }
+            } catch (error) {
+                logMessage("Gemini API 호출 오류: " + error.message);
+                console.error("Gemini API 호출 오류:", error);
+                return `오류 발생: ${error.message}`;
+            }
+        }
+
+        // [NEW] AI 버튼 이벤트 핸들러
+        const systemPrompt = "당신은 전문 전력 시스템 엔지니어이자 멘토입니다. 학생이 1500W 정격의 스마트 멀티탭을 설계하는 실험을 돕고 있습니다. 이 멀티탭에는 '부하 1'(고우선순위, 400W 발전기)과 '부하 2'(저우선순위, 180W 모터)가 연결되어 있습니다. 항상 한국어로, 학생에게 설명하듯 1-3문장의 간결하고 명확한 답변을 제공하세요.";
+
+        async function handleAiFaultAnalysis() {
+            logMessage("AI 원인 분석 요청 중...");
+            showModal("✨ AI 원인 분석", "<p class='text-center animate-pulse'>AI가 마지막 데이터를 기반으로 원인을 분석 중입니다...</p>");
+            
+            const dataString = JSON.stringify(currentData);
+            const userQuery = `치명적인 'fault' 상태가 감지되어 시스템이 셧다운되었습니다. 셧다운 직전의 마지막 데이터는 다음과 같습니다: ${dataString}. 이 데이터를 기반으로 가장 가능성이 높은 오류의 원인을 1-2문장으로 진단해주세요. (예: 고우선순위 부하의 단락, 총 전력 과부하 등)`;
+            
+            const result = await callGemini(systemPrompt, userQuery);
+            showModal("✨ AI 원인 분석", result);
+        }
+
+        async function handleAiTipRequest() {
+            logMessage("AI 절전 팁 요청 중...");
+            showModal("✨ AI 최적화 팁", "<p class='text-center animate-pulse'>AI가 현재 데이터를 기반으로 최적화 팁을 생성 중입니다...</p>");
+
+            const dataString = JSON.stringify(currentData);
+            const userQuery = `현재 시스템이 안정적으로 운영 중입니다. 데이터: ${dataString}. 이 상태를 기반으로, 학생이 고려할 수 있는 전력 최적화 또는 효율 개선 팁을 1가지 제안해주세요. (부하 2(모터)의 역률(PF)이나 계통의 THD 등을 고려하세요.)`;
+            
+            const result = await callGemini(systemPrompt, userQuery);
+            showModal("✨ AI 최적화 팁", result);
+        }
+
+        async function handleAiThdExplain() {
+            logMessage("AI THD 설명 요청 중...");
+            showModal("✨ THD (총 고조파 왜곡) 란?", "<p class='text-center animate-pulse'>AI가 THD에 대해 설명 중입니다...</p>");
+
+            const thdVal = currentData.thd || 0;
+            const userQuery = `현재 계통의 전압 THD(총 고조파 왜곡) 값이 ${thdVal.toFixed(1)}% 입니다. 이 값이 무엇을 의미하는지, 그리고 이 정도 수치가 높은 편인지 낮은 편인지 학생이 이해하기 쉽게 1-2문장으로 설명해주세요.`;
+            
+            const result = await callGemini(systemPrompt, userQuery);
+            showModal("✨ THD (총 고조파 왜곡) 란?", result);
+        }
+
+        // 데이터 업데이트 함수
+        function updateDashboard(data) {
+            if (!data) {
+                logMessage("오류: Firestore에서 데이터를 받지 못했습니다.");
+                return;
+            }
+            currentData = data; // [NEW] AI가 사용할 수 있도록 현재 데이터 저장
+            logMessage("데이터 수신: " + JSON.stringify(data));
+
+            // DOM 요소 선택
+            const totalPowerEl = document.getElementById('total-power');
+            const totalPowerBar = document.getElementById('total-power-bar');
+            const totalStatusEl = document.getElementById('total-status');
+            const voltageEl = document.getElementById('grid-voltage');
+            const thdEl = document.getElementById('grid-thd');
+            const p1El = document.getElementById('load1-power');
+            const i1El = document.getElementById('load1-current');
+            const relay1Status = document.getElementById('load1-relay-status');
+            const p2El = document.getElementById('load2-power');
+            const i2El = document.getElementById('load2-current');
+            const relay2Status = document.getElementById('load2-relay-status');
+
+            // [NEW] AI 버튼 DOM 요소 선택
+            const aiFaultBtn = document.getElementById('ai-fault-btn');
+            const aiTipBtn = document.getElementById('ai-tip-btn');
+
+            const p_total = data.pt || 0;
+            const v_rms = data.v || 0;
+            const p1 = data.p1 || 0;
+            const i1 = data.i1 || 0;
+            const p2 = data.p2 || 0;
+            const i2 = data.i2 || 0;
+            const thd = data.thd || 0;
+            const isShed = data.shed || false; // 저우선순위 차단
+            const isFault = data.fault || false; // 치명적 오류
+
+            // 1. 총 전력 및 상태 바
+            totalPowerEl.textContent = p_total.toFixed(1);
+            const powerPercent = Math.min((p_total / 1500) * 100, 100);
+            totalPowerBar.style.width = powerPercent + '%';
+
+            if (isFault) {
+                totalPowerBar.className = 'h-full bg-red-600 rounded-full transition-all duration-500';
+                totalStatusEl.textContent = '치명적 오류';
+                totalStatusEl.className = 'text-2xl font-bold text-red-500 animate-pulse';
+                aiFaultBtn.classList.remove('hidden'); // [NEW] AI 오류 분석 버튼 표시
+                aiTipBtn.classList.add('hidden'); // [NEW] AI 팁 버튼 숨김
+            } else if (p_total > 1500) {
+                totalPowerBar.className = 'h-full bg-red-600 rounded-full transition-all duration-500 animate-pulse';
+                totalStatusEl.textContent = '과부하 (차단 진행중)';
+                totalStatusEl.className = 'text-2xl font-bold text-red-500 animate-pulse';
+                aiFaultBtn.classList.add('hidden'); // [NEW]
+                aiTipBtn.classList.remove('hidden'); // [NEW]
+            } else if (p_total > 1300) {
+                totalPowerBar.className = 'h-full bg-orange-500 rounded-full transition-all duration-500';
+                totalStatusEl.textContent = '주의 (부하 높음)';
+                totalStatusEl.className = 'text-2xl font-bold text-orange-500';
+                aiFaultBtn.classList.add('hidden'); // [NEW]
+                aiTipBtn.classList.remove('hidden'); // [NEW]
+            } else {
+                totalPowerBar.className = 'h-full bg-green-500 rounded-full transition-all duration-500';
+                totalStatusEl.textContent = '정상';
+                totalStatusEl.className = 'text-2xl font-bold text-green-500';
+                aiFaultBtn.classList.add('hidden'); // [NEW]
+                aiTipBtn.classList.remove('hidden'); // [NEW]
+            }
+
+            // 2. 계통 상태
+            voltageEl.textContent = v_rms.toFixed(1) + ' V';
+            thdEl.textContent = thd.toFixed(1) + ' %';
+            // ... (3. 부하 1 / 4. 부하 2 업데이트 로직은 변경 없음) ...
+            // 3. 부하 1 (고우선순위)
+            p1El.textContent = p1.toFixed(1) + ' W';
+            i1El.textContent = i1.toFixed(2) + ' A';
+            if (isFault) {
+                relay1Status.className = 'w-4 h-4 rounded-full bg-red-500 animate-pulse';
+                document.getElementById('load1-relay-text').textContent = '차단됨 (오류)';
+            } else {
+                relay1Status.className = 'w-4 h-4 rounded-full bg-green-500 shadow-lg shadow-green-400/50';
+                document.getElementById('load1-relay-text').textContent = '연결됨';
+            }
+
+            // 4. 부하 2 (저우선순위)
+            if (isFault) {
+                p2El.textContent = '--- W';
+                i2El.textContent = '--- A';
+                relay2Status.className = 'w-4 h-4 rounded-full bg-red-500 animate-pulse';
+                document.getElementById('load2-relay-text').textContent = '차단됨 (오류)';
+            } else if (isShed) {
+                p2El.textContent = '0.0 W';
+                i2El.textContent = '0.00 A';
+                relay2Status.className = 'w-4 h-4 rounded-full bg-orange-500 animate-pulse';
+                document.getElementById('load2-relay-text').textContent = '차단됨 (과부하)';
+            } else {
+                p2El.textContent = p2.toFixed(1) + ' W';
+                i2El.textContent = i2.toFixed(2) + ' A';
+                relay2Status.className = 'w-4 h-4 rounded-full bg-green-500 shadow-lg shadow-green-400/50';
+                document.getElementById('load2-relay-text').textContent = '연결됨';
+            }
+        }
+
+        // --- 초기화 ---
+        async function initialize() {
+            if (!firebaseConfig.apiKey) {
+                logMessage("Firebase 설정을 찾을 수 없습니다.");
+                return;
+            }
+            try {
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                setLogLevel('Debug');
+                logMessage("Firebase 초기화 중...");
+
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                    logMessage("커스텀 토큰으로 로그인 성공.");
+                } else {
+                    await signInAnonymously(auth);
+                    logMessage("익명으로 로그인 성공.");
+                }
+
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        logMessage("인증 상태 확인: " + userId);
+                        
+                        // 데이터 문서 경로 설정 (공용 데이터)
+                        wattmeterDocRef = doc(db, 'artifacts', appId, 'public', 'data', 'wattmeter', 'status');
+                        
+                        // [중요] 실시간 리스너 설정
+                        startListener();
+                    } else {
+                        logMessage("인증 실패.");
+                    }
+                });
+            } catch (e) {
+                logMessage("Firebase 초기화 오류: " + e.message);
+                console.error(e);
+            }
+        }
+
+        function startListener() {
+            if (!wattmeterDocRef) return;
+            logMessage("실시간 데이터 리스너 시작: " + wattmeterDocRef.path);
+            
+            onSnapshot(wattmeterDocRef, (doc) => {
+                if (doc.exists()) {
+                    updateDashboard(doc.data());
+                } else {
+                    logMessage("경고: 'wattmeter/status' 문서를 찾을 수 없습니다. Wi-Fi 모듈이 데이터를 전송하고 있는지 확인하세요.");
+                    // 초기화를 위해 더미 데이터로 문서 생성 (테스트용)
+                    const dummyData = { v: 0, p1: 0, i1: 0, p2: 0, i2: 0, pt: 0, thd: 0, shed: false, fault: false, lastUpdate: new Date().toISOString() };
+                    setDoc(wattmeterDocRef, dummyData);
+                    logMessage("더미 'status' 문서를 생성했습니다.");
+                }
+            }, (error) => {
+                logMessage("Firestore 리스너 오류: " + error.message);
+                console.error(error);
+            });
+        }
+
+        // [MODIFIED] 페이지 로드 시 초기화 및 AI 버튼 리스너 실행
+        window.onload = () => {
+            initialize();
+
+            // AI 모달 및 버튼 이벤트 리스너 추가
+            document.getElementById('close-modal-btn').onclick = () => 
+                document.getElementById('gemini-modal').classList.add('hidden');
+            
+            document.getElementById('ai-fault-btn').onclick = handleAiFaultAnalysis;
+            document.getElementById('ai-tip-btn').onclick = handleAiTipRequest;
+            document.getElementById('ai-thd-btn').onclick = handleAiThdExplain;
+        };
+
+    </script>
+    <style>
+        body { font-family: 'Inter', 'Noto Sans KR', sans-serif; }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200 p-6 min-h-screen">
+
+    <!-- [NEW] Gemini AI Modal -->
+    <div id="gemini-modal" class="fixed inset-0 bg-gray-900 bg-opacity-80 flex items-center justify-center z-50 hidden">
+        <div class="bg-gray-800 rounded-lg shadow-2xl p-6 w-full max-w-lg border border-cyan-500 mx-4">
+            <div class="flex justify-between items-center mb-4">
+                <h3 id="gemini-modal-title" class="text-2xl font-bold text-cyan-300">✨ AI 분석 결과</h3>
+                <button id="close-modal-btn" class="text-gray-400 hover:text-white text-3xl">&times;</button>
+            </div>
+            <div id="gemini-modal-content" class="text-gray-200 min-h-[100px] bg-gray-900 p-4 rounded-md border border-gray-700">
+                <!-- AI 응답이 여기에 삽입됩니다. -->
+            </div>
+        </div>
+    </div>
+
+    <div class="max-w-7xl mx-auto">
+        
+        <!-- 헤더 -->
+        <header class="mb-6 pb-4 border-b border-gray-700">
+            <h1 class="text-4xl font-bold text-white">실시간 전력 계통 감시 (SCADA)</h1>
+            <p class="text-lg text-cyan-400">Multi-Channel Wattmeter Dashboard</p>
+        </header>
+
+        <!-- 메인 대시보드 그리드 -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+
+            <!-- 1. 총 전력 (메인) -->
+            <div class="md:col-span-2 bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700">
+                <h2 class="text-2xl font-semibold text-white mb-4">총 사용 전력 (정격 1500W)</h2>
+                <div class="flex items-center justify-center space-x-4 mb-4">
+                    <span id="total-power" class="text-8xl font-bold text-cyan-300">0.0</span>
+                    <span class="text-5xl text-gray-400">W</span>
+                </div>
+                <div class="w-full bg-gray-700 rounded-full h-8 overflow-hidden">
+                    <div id="total-power-bar" class="h-full bg-green-500 rounded-full transition-all duration-500" style="width: 0%;"></div>
+                </div>
+                <div class="text-center mt-4">
+                    <span id="total-status" class="text-2xl font-bold text-green-500">정상</span>
+                    <!-- [NEW] AI Fault Analysis Button -->
+                    <button id="ai-fault-btn" class="hidden mt-4 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition">
+                        ✨ AI 원인 분석
+                    </button>
+                </div>
+                <!-- [NEW] AI Optimization Tip Button -->
+                <div class="text-center mt-4">
+                    <button id="ai-tip-btn" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition">
+                        ✨ AI 최적화 팁 요청
+                    </button>
+                </div>
+            </div>
+
+            <!-- 2. 계통 상태 -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700">
+                <h2 class="text-2xl font-semibold text-white mb-4">계통 상태</h2>
+                <div class="space-y-4">
+                    <div class="flex justify-between items-center">
+                        <span class="text-xl text-gray-400">계통 전압</span>
+                        <span id="grid-voltage" class="text-3xl font-mono text-cyan-300">0.0 V</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-xl text-gray-400">주파수</span>
+                        <span id="grid-frequency" class="text-3xl font-mono text-cyan-300">60.0 Hz</span>
+                    </div>
+                    <div class="flex justify-between items-center">
+                        <span class="text-xl text-gray-400">전압 THD</span>
+                        <span id="grid-thd" class="text-3xl font-mono text-orange-400">0.0 %</span>
+                    </div>
+                    <!-- [NEW] AI THD Explanation Button -->
+                    <div class="text-right mt-2">
+                        <button id="ai-thd-btn" class="text-sm text-cyan-400 hover:underline">✨ THD란?</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 3. 부하 1 (고우선순위) -->
+            <!-- ... (내용 변경 없음) ... -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700">
+                <h2 class="text-xl font-semibold text-white mb-4">부하 1 (고우선순위 - 발전기)</h2>
+                <div class="flex justify-between items-center mb-3">
+                    <span class="text-lg text-gray-400">사용 전력</span>
+                    <span id="load1-power" class="text-4xl font-mono text-yellow-300">0.0 W</span>
+                </div>
+                <div class="flex justify-between items-center mb-4">
+                    <span class="text-lg text-gray-400">전류</span>
+                    <span id="load1-current" class="text-2xl font-mono text-yellow-300">0.00 A</span>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <span id="load1-relay-status" class="w-4 h-4 rounded-full bg-gray-500 shadow-lg"></span>
+                    <span id="load1-relay-text" class="text-lg text-gray-300">상태 확인중...</span>
+                </div>
+            </div>
+
+            <!-- 4. 부하 2 (저우선순위) -->
+            <!-- ... (내용 변경 없음) ... -->
+            <div class="bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700">
+                <h2 class="text-xl font-semibold text-white mb-4">부하 2 (저우선순위 - 모터)</h2>
+                <div class="flex justify-between items-center mb-3">
+                    <span class="text-lg text-gray-400">사용 전력</span>
+                    <span id="load2-power" class="text-4xl font-mono text-fuchsia-400">0.0 W</span>
+                </div>
+                <div class="flex justify-between items-center mb-4">
+                    <span class="text-lg text-gray-400">전류</span>
+                    <span id="load2-current" class="text-2xl font-mono text-fuchsia-400">0.00 A</span>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <span id="load2-relay-status" class="w-4 h-4 rounded-full bg-gray-500 shadow-lg"></span>
+                    <span id="load2-relay-text" class="text-lg text-gray-300">상태 확인중...</span>
+                </div>
+            </div>
+
+
+            <!-- 5. 시스템 로그 -->
+            <!-- ... (내용 변경 없음) ... -->
+            <div class="md:col-span-3 bg-gray-800 p-6 rounded-lg shadow-2xl border border-gray-700">
+                <h2 class="text-xl font-semibold text-white mb-4">시스템 로그</h2>
+                <textarea id="system-log" readonly class="w-full h-48 bg-gray-900 text-gray-300 font-mono text-sm p-4 rounded-md border border-gray-700 focus:outline-none focus:ring-2 focus:ring-cyan-500"></textarea>
+            </div>
+
+        </div> <!-- end grid -->
+
+    </div>
+</body>
+</html>
