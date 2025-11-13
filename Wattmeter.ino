@@ -1,138 +1,193 @@
 /*
  * ==============================================================================
- * [v17 - 최종 수정] + [Test.ino 파형 로직 통합]
- * - v17의 전체 구조에 'Fuzzy.h' 라이브러리의 정확한 문법을 적용.
- * - 'eFLL.h'의 'new Trap', 'new Trian'을 'Fuzzy.h'의 'new FuzzySet(a,b,c,d)'로
- * 전부 교체함.
- * - 객체 생성 방식을 'Fuzzy.h' 예제에 맞게 포인터 방식으로 변경
- * - [통합] 파형 화면(SCREEN_COMBINED_WAVEFORM)의 로직을 Test.ino의
- * 60Hz 0점 통과(Zero-Cross) 동기화 및 프레임 버퍼 방식으로 교체.
+ * [v21 - 컴파일 오류 수정]
+ * - 'I_peak_dynamic' 및 'V_peak_dynamic' was not declared in this scope 오류 해결
+ * - 해당 변수들을 전역 변수 영역(139, 140행)에 'float' 타입으로 선언.
+ * - 0으로 나누기 오류를 방지하기 위해 0이 아닌 초기값 할당.
+ * * [v20 - 홈 화면 UI 및 실시간 설정 기능]
+ * - 사용자의 UI 구조 변경 요청을 반영
  *
- * [사용자 요청 수정]
- * - 16번 함수 'runCombinedWaveformLoop'를 'Test.ino'의 6번 함수 내용으로
- * 완전히 대체. (오프셋 보정 로직 포함)
+ * 1. 화면 상태 (`ScreenState`) 전면 개편:
+ * - `SCREEN_HOME`: 메인 메뉴(홈 화면) 추가. 부팅 시 기본 화면.
+ * - `SCREEN_SETTINGS`: 설정 메뉴 화면 추가.
+ * - `SCREEN_SETTINGS_CALIB`: (2차 깊이) 보정 값 설정 서브메뉴 추가.
+ * - `SCREEN_SETTINGS_PROTECT`: (2차 깊이) 보호 임계값 설정 서브메뉴 추가.
+ *
+ * 2. 탐색 로직 (`checkTouchInput`) 변경:
+ * - '아무 곳이나 터치' 방식에서 '버튼 좌표' 기반 탐색으로 변경.
+ * - 모든 서브 화면에 '뒤로 가기' 버튼 (<) 추가 (좌측 상단).
+ * - 홈 화면에서 각 기능(전력, 페이저, 파형, THD, 설정)으로 진입하는 버튼 구현.
+ *
+ * 3. 실시간 설정 기능 (2차 깊이):
+ * - `V_CALIB_RMS`, `I_CALIB_RMS`를 `const`에서 일반 `float` 변수로 변경.
+ * - `VOLTAGE_THRESHOLD`를 `#define`에서 일반 `float` 변수로 변경.
+ * - 설정 서브메뉴에서 `[+]`, `[-]` 버튼으로 이 값들을 실시간 변경 가능.
+ * - 변경된 값은 즉시 `calculatePowerMetrics` 등 모든 계산에 반영됨.
+ * (참고: EEPROM을 사용하지 않았으므로 재부팅 시 초기화됨)
+ *
+ * 4. 이전 기능 유지:
+ * - v19의 모든 기능(페이저, 파형, THD, 메인 전력)은 홈 화면에서 접근 가능.
+ *
+ * [v19 - 페이저 다이어그램 및 UI 개선]
+ * ... (이전 로그)
  * ==============================================================================
  */
+
 
 // --- 라이브러리 포함 ---
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ILI9341.h>
-#include <XPT2046_Touchscreen.h> // 터치스크린 라이브러리
+#include <XPT2046_Touchscreen.h>
 #include <math.h>
-#include <Fuzzy.h> // [v17] 퍼지 로직 라이브러리
+#include <Fuzzy.h>
 #include <FuzzySet.h>
 #include <arm_math.h>
 
-// --- 화면 상태 정의 ---
+// --- [v20] 화면 상태 정의 (홈 화면 기반) ---
 enum ScreenState {
+  SCREEN_HOME,              // [v20] 홈 메뉴
   SCREEN_MAIN_POWER,
   SCREEN_PHASE_DIFFERENCE,
   SCREEN_COMBINED_WAVEFORM, 
   SCREEN_THD,
+  SCREEN_SETTINGS,          // [v20] 설정 메뉴
+  SCREEN_SETTINGS_CALIB,    // [v20] 2차 깊이: 보정
+  SCREEN_SETTINGS_PROTECT,  // [v20] 2차 깊이: 보호
   SCREEN_WARNING
 };
-volatile ScreenState currentScreen = SCREEN_MAIN_POWER;
+volatile ScreenState currentScreen = SCREEN_HOME; // [v20] 부팅 시 홈 화면
 volatile bool screenNeedsRedraw = true;
 
-// --- [v17] 릴레이 핀 3개로 변경 ---
-#define RELAY_1_PIN 4        // 부하 1 릴레이
-#define RELAY_2_PIN 5       // 부하 2 릴레이
-
-// --- [v17] 기존 임계값 설정 (과전압은 유지) ---
-#define VOLTAGE_THRESHOLD 240.0
-// #define CURRENT_THRESHOLD 10.0 // [v17] 퍼지 로직이 대체
-
-volatile bool warningActive = false;
-String warningMessage = "";
-
-// --- 핀 정의 (센서) ---
+// --- 핀 정의 ---
+#define RELAY_1_PIN 4
+#define RELAY_2_PIN 5
 #define VOLTAGE_PIN A3
-#define CURRENT_PIN A4
-
-// --- 핀 정의 (Display & Touch) ---
+#define CURRENT_PIN A2
+#define CURRENT_PIN_LOAD1 A4
+#define CURRENT_PIN_LOAD2 A5
 #define TFT_CS     10
 #define TFT_DC     9
 #define TFT_RST    8
 #define TOUCH_CS   7
+#define WIFI_TX_PIN 2
+#define WIFI_RX_PIN 3
 
-#define FFT_N 512                   // FFT 샘플 개수 (2의 거듭제곱)
-#define SAMPLING_FREQ_HZ 7680.0f    // 샘플링 주파수 (7.68kHz)
-#define SAMPLING_PERIOD_US (1000000.0f / SAMPLING_FREQ_HZ) // 약 130.2µs
-#define FUNDAMENTAL_BIN 4           // 60Hz에 해당하는 FFT Bin (60Hz / 15Hz/bin)
+// --- [v20] 실시간 설정 변수 (기존 define/const 대체) ---
+float VOLTAGE_THRESHOLD = 240.0; // 과전압 임계값
+float V_CALIB_RMS = 0.1775;      // 전압 보정 계수
+float I_CALIB_RMS = 0.0482;      // 전류 보정 계수 (모든 채널 공통)
+
+// --- [v20] 설정 화면용 이전 값 (깜빡임 제거) ---
+float prev_VOLTAGE_THRESHOLD = 240.0;
+float prev_V_CALIB_RMS = 0.1775;
+float prev_I_CALIB_RMS = 0.0482;
+
+volatile bool warningActive = false;
+String warningMessage = "";
+
+// --- FFT 상수 ---
+#define FFT_N 512
+#define SAMPLING_FREQ_HZ 7680.0f
+#define SAMPLING_PERIOD_US (1000000.0f / SAMPLING_FREQ_HZ)
+#define FUNDAMENTAL_BIN 4
 #define MAX_HARMONIC 40
 
-// ==============================================================================
-// (v16과 동일한 설정값들...)
-// ==============================================================================
+// --- 캘리브레이션 상수 (ADC 오프셋) ---
 const float V_RMS_OFFSET_CORRECTION = 7.1; 
 const float I_RMS_OFFSET_CORRECTION = 2.5546; 
 const float V_ADC_MIDPOINT = 8192.0; 
 const float I_ADC_MIDPOINT = 8192.0; 
-const float V_CALIB_RMS = 0.1775; 
-const float I_CALIB_RMS = 0.0482; 
 
 #define SAMPLES_PER_CALC 334 
 #define SAMPLE_PERIOD_US 1000
 const float FREQUENCY = 60.0;
 
+// --- 터치스크린 상수 ---
 #define TS_MINX 370
 #define TS_MINY 450
 #define TS_MAXX 3760
 #define TS_MAXY 3670
 
+// --- 객체 생성 ---
 Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC, TFT_RST);
 XPT2046_Touchscreen ts(TOUCH_CS); 
 SPISettings spiSettingsTFT(40000000, MSBFIRST, SPI_MODE0);
 SPISettings spiSettingsTouch(2000000, MSBFIRST, SPI_MODE0);
 
+// --- UI 상수 ---
 #define SCREEN_WIDTH 320 
 #define SCREEN_HEIGHT 240 
+
+// --- 파형 화면 상수 ---
 #define PLOT_X_START 30 
 #define PLOT_X_END 290 
-#define PLOT_WIDTH (PLOT_X_END - PLOT_X_START) // 260
+#define PLOT_WIDTH (PLOT_X_END - PLOT_X_START)
 #define PLOT_Y_START 50 
 #define PLOT_Y_END 210 
 #define PLOT_Y_CENTER (PLOT_Y_START + ((PLOT_Y_END - PLOT_Y_START) / 2)) 
 const float PLOT_HEIGHT_HALF = (PLOT_Y_END - PLOT_Y_START) / 2.0;
+#define WAVEFORM_SAMPLE_PERIOD_US 100
+int last_frame_y_v[PLOT_WIDTH];
+int last_frame_y_i[PLOT_WIDTH];
+float prev_frame_V_peak = 0.0;
+float prev_frame_I_peak = 0.0;
 
-// --- [Test.ino 통합] 파형 그리기용 상수 및 버퍼 ---
-#define WAVEFORM_SAMPLE_PERIOD_US 100 // 100µs (Test.ino에서 가져옴) 
-int last_frame_y_v[PLOT_WIDTH]; // 이전 프레임 V 버퍼 
-int last_frame_y_i[PLOT_WIDTH]; // 이전 프레임 I 버퍼 
-// --- [Test.ino 통합] ---
+// [v21-FIX] 컴파일 오류 수정을 위해 전역 변수 선언 추가
+// (Add global variable declaration to fix compilation error)
+float V_peak_dynamic = 350.0; // V_rms (220*1.414) * 1.1 margin
+float I_peak_dynamic = 1.0;   // 1A 기본값 (0으로 나누기 방지)
 
-float V_peak_dynamic = 360.0; 
-float I_peak_dynamic = 42.4; 
-// [Test.ino 통합] 기존 current_x, last_y_v, last_y_i, frame_V_peak, frame_I_peak 삭제 
+// --- [v19] 페이저 다이어그램 상수 ---
+#define PHASOR_CX 235
+#define PHASOR_CY 130
+#define PHASOR_RADIUS 75
+#define PHASOR_MAX_CURRENT 10.0
 
+// --- 전역 변수 (물리량) ---
 float V_rms = 0.0;
-float I_rms = 0.0;
+float I_rms = 0.0; 
+float I_rms_load1 = 0.0;
+float I_rms_load2 = 0.0;
 float P_real = 0.0; 
 float Q_reactive = 0.0; 
 float S_apparent = 0.0;
 float PF = 0.0;
 float THD_value = 0.0;
-float phase_degrees = 0.0; 
+
+// --- 전역 변수 (위상) ---
+float phase_degrees = 0.0;
 String lead_lag_status = "---"; 
+float phase_main_deg = 0.0;
+float phase_load1_deg = 0.0;
+float phase_load2_deg = 0.0;
+
+// --- 전역 변수 (이전 값 - 화면 클리어용) ---
 float prev_phase_degrees = 0.0;
 String prev_lead_lag_status = "---";
+float prev_phase_main_deg = 0.0;
+float prev_phase_load1_deg = 0.0;
+float prev_phase_load2_deg = 0.0;
+int prev_v_x = PHASOR_CX, prev_v_y = PHASOR_CY;
+int prev_im_x = PHASOR_CX, prev_im_y = PHASOR_CY;
+int prev_i1_x = PHASOR_CX, prev_i1_y = PHASOR_CY;
+int prev_i2_x = PHASOR_CX, prev_i2_y = PHASOR_CY;
 
-float32_t v_samples[FFT_N];         // 전압 샘플 버퍼
-float32_t i_samples[FFT_N];         // 전류 샘플 버퍼
-float32_t v_fft_output[FFT_N];      // FFT 연산 결과 (복소수)
-float32_t i_fft_output[FFT_N];      // FFT 연산 결과 (복소수)
-float32_t v_mags[FFT_N / 2];        // 전압 스펙트럼 (크기)
-float32_t i_mags[FFT_N / 2];        // 전류 스펙트럼 (크기)
-float32_t thd_v_value = 0.0;        // THD-V (전압 고조파 왜곡률)
-float32_t thd_i_value = 0.0;        // THD-I (전류 고조파 왜곡률)
-float32_t prev_thd_v = 0.0;         // 깜빡임 제거용
-float32_t prev_thd_i = 0.0;         // 깜빡임 제거용
-
+// --- FFT 버퍼 ---
+float32_t v_samples[FFT_N];
+float32_t i_samples[FFT_N];
+float32_t v_fft_output[FFT_N];
+float32_t i_fft_output[FFT_N];
+float32_t v_mags[FFT_N / 2];
+float32_t i_mags[FFT_N / 2];
+float32_t thd_v_value = 0.0;
+float32_t thd_i_value = 0.0;
+float32_t prev_thd_v = 0.0;
+float32_t prev_thd_i = 0.0;
 arm_rfft_fast_instance_f32 fft_inst_v;
 arm_rfft_fast_instance_f32 fft_inst_i;
 
-// --- [v17 수정] 퍼지 로직 전역 포인터 변수 ---
+// --- 퍼지 로직 변수 ---
 Fuzzy *fuzzy; 
 FuzzyInput *totalCurrent; 
 FuzzyInput *currentChangeRate; 
@@ -141,7 +196,6 @@ FuzzySet* safeCurrent;
 FuzzySet* warningCurrent; 
 FuzzySet* dangerCurrent; 
 FuzzySet* criticalCurrent; 
-FuzzySet* stableChFuzzyange;
 FuzzySet* stableChange;
 FuzzySet* slowIncrease;
 FuzzySet* suddenSurge;
@@ -149,20 +203,39 @@ FuzzySet* level0;
 FuzzySet* level3;
 FuzzySet* level6;
 FuzzySet* level10; 
-
-// dI/dt 계산용
 float last_I_rms = 0.0;
 unsigned long lastFuzzyTime = 0; 
-// --- [v17] ---
 
-// --- [v16] 함수 프로토타입 선언 ---
+// --- 함수 프로토타입 ---
 void updateYAxisLabels();
-// --- [v17] 함수 프로토타입 선언 ---
 void buildFuzzySystem();
 void runFuzzyLogic(); 
 void controlRelays(float level);
-// --- [Test.ino 통합] 함수 프로토타입 선언 ---
 void waitForVoltageZeroCross();
+float calculatePhase(long time_diff, float period_us);
+void drawBackButton(); // [v20]
+void displayHomeScreenStatic(); // [v20]
+void displaySettingsScreenStatic(); // [v20]
+void displaySettingsCalibStatic(); // [v20]
+void displaySettingsProtectStatic(); // [v20]
+void runSettingsCalib(); // [v20]
+void runSettingsProtect(); // [v20]
+void displaySettingsCalibValues(); // [v20]
+void displaySettingsProtectValues(); // [v20]
+
+// [v21-FIX] 컴파일 오류가 발생했던 함수들의 프로토타입
+// (실제 선언은 이미 위에 존재하지만 명확성을 위해 언급)
+void displayMainScreenStatic();
+void displayPhaseScreenStatic();
+void drawWaveformGridAndLabels();
+void displayTHDScreenStatic();
+void displayWarningScreenStatic();
+void runMainPowerCalculation();
+void runPhaseCalculation();
+void runCombinedWaveformLoop();
+void runTHDCalculation();
+void performFFT_and_CalcTHD();
+void calculatePowerMetrics();
 
 
 // ==============================================================================
@@ -170,12 +243,13 @@ void waitForVoltageZeroCross();
 // ==============================================================================
 void setup() {
   Serial.begin(115200);
-  Serial.println("Wattmeter v17 (Fuzzy.h + 60Hz Sync Waveform) Booting...");
+  Serial.println("Wattmeter v20 (Home UI & Settings) Booting..."); // [v20]
   analogReadResolution(14); 
   pinMode(VOLTAGE_PIN, INPUT); 
   pinMode(CURRENT_PIN, INPUT); 
+  pinMode(CURRENT_PIN_LOAD1, INPUT);
+  pinMode(CURRENT_PIN_LOAD2, INPUT);
 
-  // [v17] 3개 릴레이 핀 초기화 (LOW = ON / 정상)
   pinMode(RELAY_1_PIN, OUTPUT); 
   pinMode(RELAY_2_PIN, OUTPUT); 
   digitalWrite(RELAY_1_PIN, LOW); 
@@ -188,26 +262,22 @@ void setup() {
   ts.setRotation(3); 
   
   Serial.println("TFT & Touch OK");
-  Serial.print("Using V_RMS_OFFSET_CORRECTION: "); Serial.println(V_RMS_OFFSET_CORRECTION);
-  Serial.print("Using I_RMS_OFFSET_CORRECTION: "); Serial.println(I_RMS_OFFSET_CORRECTION); 
+  Serial.print("Initial V_CALIB_RMS: "); Serial.println(V_CALIB_RMS);
+  Serial.print("Initial I_CALIB_RMS: "); Serial.println(I_CALIB_RMS); 
+  Serial.print("Initial VOLTAGE_THRESHOLD: "); Serial.println(VOLTAGE_THRESHOLD); 
 
-  // [v17 수정] 퍼지 객체 생성 (포인터 초기화)
   fuzzy = new Fuzzy();
   totalCurrent = new FuzzyInput(1); 
   currentChangeRate = new FuzzyInput(2); 
   shutdownLevel = new FuzzyOutput(1); 
   
-  // [v17] 퍼지 시스템 빌드
-  buildFuzzySystem(); // 'Fuzzy.h' 문법으로 수정됨 
+  buildFuzzySystem(); 
   Serial.println("Fuzzy Logic System Built (using Fuzzy.h)"); 
   lastFuzzyTime = millis(); 
-  // [v17] ---
 
- // [v18] FFT 인스턴스 초기화
   arm_rfft_fast_init_f32(&fft_inst_v, FFT_N); 
   arm_rfft_fast_init_f32(&fft_inst_i, FFT_N); 
   Serial.println("CMSIS-DSP FFT Initialized.");
-  // [v18] ---
 
   screenNeedsRedraw = true; 
 }
@@ -216,7 +286,7 @@ void setup() {
 // 2. Main Loop
 // ==============================================================================
 void loop() {
-  checkTouchInput();
+  checkTouchInput(); // [v20] 터치 로직이 여기로 이동하여 항상 반응
   
   if (screenNeedsRedraw) { 
     tft.fillScreen(ILI9341_WHITE); 
@@ -225,7 +295,11 @@ void loop() {
       currentScreen = SCREEN_WARNING;
       displayWarningScreenStatic();
     } else { 
+      // [v20] 정적 UI 그리기
       switch(currentScreen) {
+        case SCREEN_HOME:
+          displayHomeScreenStatic();
+          break;
         case SCREEN_MAIN_POWER:
           displayMainScreenStatic(); 
           break;
@@ -233,19 +307,29 @@ void loop() {
           displayPhaseScreenStatic();
           break;
         case SCREEN_COMBINED_WAVEFORM:
-          drawWaveformGridAndLabels(); 
+          drawWaveformGridAndLabels();
           updateYAxisLabels();      
-          
-          // [Test.ino 통합] 프레임 버퍼 초기화 (0점) 
           for(int i=0; i<PLOT_WIDTH; i++) {
               last_frame_y_v[i] = PLOT_Y_CENTER; 
               last_frame_y_i[i] = PLOT_Y_CENTER; 
           }
-          
-          // [Test.ino 통합] 기존 current_x, last_y, frame_peak 초기화 코드 삭제 
+          prev_frame_V_peak = 0.0;
+          prev_frame_I_peak = 0.0;
           break;
-        case SCREEN_THD: // [v18] THD 화면 정적 UI 그리기
+        case SCREEN_THD:
           displayTHDScreenStatic(); 
+          break;
+        case SCREEN_SETTINGS:
+          displaySettingsScreenStatic();
+          break;
+        case SCREEN_SETTINGS_CALIB:
+          displaySettingsCalibStatic();
+          prev_V_CALIB_RMS = -1.0; // [v20] 강제
+          prev_I_CALIB_RMS = -1.0;
+          break;
+        case SCREEN_SETTINGS_PROTECT:
+          displaySettingsProtectStatic();
+          prev_VOLTAGE_THRESHOLD = -1.0; // [v20] 강제
           break;
         case SCREEN_WARNING: 
           break;
@@ -254,7 +338,7 @@ void loop() {
     screenNeedsRedraw = false; 
   }
   
-  // 3. 현재 화면 상태에 따라 적절한 동적 작업 실행
+  // 3. [v20] 동적 UI 업데이트 (계산이 필요한 화면만)
   switch(currentScreen) {
     case SCREEN_MAIN_POWER:
       runMainPowerCalculation(); 
@@ -263,27 +347,33 @@ void loop() {
       runPhaseCalculation();
       break;
     case SCREEN_COMBINED_WAVEFORM:
-      // [Test.ino 통합] 0점 통과 대기 후 프레임 그리기 
       waitForVoltageZeroCross();
       
-      // [Test.ino 통합] 0점 대기 중 터치/경고 발생 시 루프 탈출
-      checkTouchInput();
+      // 0점 대기 중 터치/경고 발생 시 루프 탈출 (checkTouchInput은 루프 맨 위에서 이미 호출됨)
       if (screenNeedsRedraw || warningActive) break; 
       
       runCombinedWaveformLoop();
-      // [v17] 경고: 이 함수는 calculatePowerMetrics()를 호출 안함 
       break;
-    case SCREEN_THD: // [v18] THD 계산 및 표시 함수 호출
+    case SCREEN_THD:
       runTHDCalculation(); 
       break;
+    case SCREEN_SETTINGS_CALIB:
+      runSettingsCalib(); // [v20] 설정 값 동적 표시
+      break;
+    case SCREEN_SETTINGS_PROTECT:
+      runSettingsProtect(); // [v20] 설정 값 동적 표시
+      break;
+    case SCREEN_HOME: 
+    case SCREEN_SETTINGS:
     case SCREEN_WARNING: 
+      // 이 화면들은 정적이므로 동적 업데이트가 필요 없음
       break;
   }
 }
 
 
 // ==============================================================================
-// 3. 터치 입력 확인 함수 (v17과 동일)
+// 3. [v20] 터치 입력 확인 함수 (버튼 기반)
 // ==============================================================================
 void checkTouchInput() {
   SPI.beginTransaction(spiSettingsTouch);
@@ -295,45 +385,120 @@ void checkTouchInput() {
     TS_Point p = ts.getPoint();
     SPI.endTransaction();
 
+    // 터치 좌표 보정 (필요시)
+    // p.x = map(p.x, TS_MINX, TS_MAXX, 0, SCREEN_WIDTH);
+    // p.y = map(p.y, TS_MINY, TS_MAXY, 0, SCREEN_HEIGHT);
+    // Serial.print("Touch at: "); Serial.print(p.x); Serial.print(", "); Serial.println(p.y);
+
+    // --- [v20] 공통 경고 화면 터치 ---
     if (currentScreen == SCREEN_WARNING) { 
       warningActive = false;
-      // [v17] 2개 릴레이 모두 리셋 (LOW = ON) 
       digitalWrite(RELAY_1_PIN, LOW); 
       digitalWrite(RELAY_2_PIN, LOW); 
-      currentScreen = SCREEN_MAIN_POWER; 
+      currentScreen = SCREEN_HOME; // [v20] 경고 해제 시 홈으로
       screenNeedsRedraw = true;
-      delay(100); 
+      delay(100); // Debounce
       return; 
     }
 
-    if (currentScreen == SCREEN_MAIN_POWER) {
-        currentScreen = SCREEN_PHASE_DIFFERENCE;
-        Serial.println("Screen -> PHASE"); 
-    } 
-    else if (currentScreen == SCREEN_PHASE_DIFFERENCE) { 
-        currentScreen = SCREEN_COMBINED_WAVEFORM;
-        Serial.println("Screen -> COMBINED WAVEFORM"); 
+    // --- [v20] 공통 뒤로 가기 버튼 (<) ---
+    if (currentScreen != SCREEN_HOME && currentScreen != SCREEN_WARNING) {
+      if (p.x >= 5 && p.x <= 55 && p.y >= 5 && p.y <= 35) {
+        if (currentScreen == SCREEN_SETTINGS_CALIB || currentScreen == SCREEN_SETTINGS_PROTECT) {
+          currentScreen = SCREEN_SETTINGS; // 2차 깊이 -> 설정
+        } else {
+          currentScreen = SCREEN_HOME; // 1차 깊이 -> 홈
+        }
+        screenNeedsRedraw = true;
+        delay(100); // Debounce
+        return;
+      }
     }
-    else if (currentScreen == SCREEN_COMBINED_WAVEFORM) {
-        currentScreen = SCREEN_THD; // [v18] THD 화면으로 이동 
-        Serial.println("Screen -> THD/FFT"); 
-    }
-    else if (currentScreen == SCREEN_THD) { // [Test.ino 통합] THD -> MAIN 순환
-        currentScreen = SCREEN_MAIN_POWER;
-        Serial.println("Screen -> MAIN POWER"); 
+
+    // --- [v20] 화면별 버튼 로직 ---
+    switch (currentScreen) {
+      case SCREEN_HOME:
+        // 버튼 1: MAIN POWER (X: 20-150, Y: 50-90)
+        if (p.x >= 20 && p.x <= 150 && p.y >= 50 && p.y <= 90) {
+          currentScreen = SCREEN_MAIN_POWER;
+          screenNeedsRedraw = true;
+        }
+        // 버튼 2: PHASOR (X: 170-300, Y: 50-90)
+        else if (p.x >= 170 && p.x <= 300 && p.y >= 50 && p.y <= 90) {
+          currentScreen = SCREEN_PHASE_DIFFERENCE;
+          screenNeedsRedraw = true;
+        }
+        // 버튼 3: WAVEFORM (X: 20-150, Y: 110-150)
+        else if (p.x >= 20 && p.x <= 150 && p.y >= 110 && p.y <= 150) {
+          currentScreen = SCREEN_COMBINED_WAVEFORM;
+          screenNeedsRedraw = true;
+        }
+        // 버튼 4: THD (X: 170-300, Y: 110-150)
+        else if (p.x >= 170 && p.x <= 300 && p.y >= 110 && p.y <= 150) {
+          currentScreen = SCREEN_THD;
+          screenNeedsRedraw = true;
+        }
+        // 버튼 5: SETTINGS (X: 20-300, Y: 170-210)
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 170 && p.y <= 210) {
+          currentScreen = SCREEN_SETTINGS;
+          screenNeedsRedraw = true;
+        }
+        break;
+
+      case SCREEN_SETTINGS:
+        // 버튼 1: CALIBRATION (X: 20-300, Y: 70-110)
+        if (p.x >= 20 && p.x <= 300 && p.y >= 70 && p.y <= 110) {
+          currentScreen = SCREEN_SETTINGS_CALIB;
+          screenNeedsRedraw = true;
+        }
+        // 버튼 2: PROTECTION (X: 20-300, Y: 130-170)
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 130 && p.y <= 170) {
+          currentScreen = SCREEN_SETTINGS_PROTECT;
+          screenNeedsRedraw = true;
+        }
+        break;
+
+      case SCREEN_SETTINGS_CALIB:
+        // V_CALIB [+] (X: 250, Y: 70)
+        if (p.x >= 240 && p.x <= 300 && p.y >= 60 && p.y <= 90) V_CALIB_RMS += 0.0001;
+        // V_CALIB [-] (X: 190, Y: 70)
+        else if (p.x >= 180 && p.x <= 240 && p.y >= 60 && p.y <= 90) V_CALIB_RMS -= 0.0001;
+        // I_CALIB [+] (X: 250, Y: 130)
+        else if (p.x >= 240 && p.x <= 300 && p.y >= 120 && p.y <= 150) I_CALIB_RMS += 0.0001;
+        // I_CALIB [-] (X: 190, Y: 130)
+        else if (p.x >= 180 && p.x <= 240 && p.y >= 120 && p.y <= 150) I_CALIB_RMS -= 0.0001;
+        break;
+        
+      case SCREEN_SETTINGS_PROTECT:
+        // VOLT_THRESH [+] (X: 250, Y: 70)
+        if (p.x >= 240 && p.x <= 300 && p.y >= 60 && p.y <= 90) VOLTAGE_THRESHOLD += 1.0;
+        // VOLT_THRESH [-] (X: 190, Y: 70)
+        else if (p.x >= 180 && p.x <= 240 && p.y >= 60 && p.y <= 90) VOLTAGE_THRESHOLD -= 1.0;
+        break;
+        
+      case SCREEN_MAIN_POWER:
+      case SCREEN_PHASE_DIFFERENCE:
+      case SCREEN_COMBINED_WAVEFORM:
+      case SCREEN_THD:
+        // 뒤로 가기 버튼 외에는 터치 이벤트 없음
+        break;
     }
     
-    screenNeedsRedraw = true;
-    delay(100); 
+    delay(100); // Debounce
   }
 }
 
 // ==============================================================================
-// 4. 헬퍼 함수 (수정 없음)
+// 4. 헬퍼 함수 (TFT 출력)
 // ==============================================================================
 
 // printTFTValue (float)
 void printTFTValue(int x, int y, float value, float prev_value, int precision, uint16_t color, String unit) {
+  // [v20] 값 변경 시에만 다시 그리도록 최적화 (깜빡임 제거)
+  if (abs(value - prev_value) < (pow(10, -precision) / 2.0)) {
+    return; // 변경 없음
+  }
+  
   char buffer[20];
   tft.setTextColor(ILI9341_WHITE); 
   tft.setCursor(x, y);
@@ -347,6 +512,8 @@ void printTFTValue(int x, int y, float value, float prev_value, int precision, u
 
 // printTFTValue (String)
 void printTFTValue(int x, int y, String value, String prev_value, uint16_t color) {
+  if (value.equals(prev_value)) return; // 변경 없음
+  
   tft.setTextColor(ILI9341_WHITE);
   tft.setCursor(x, y);
   tft.print(prev_value);
@@ -355,56 +522,86 @@ void printTFTValue(int x, int y, String value, String prev_value, uint16_t color
   tft.print(value);
 }
 
+// [v19] 위상 계산 헬퍼 함수
+float calculatePhase(long time_diff, float period_us) {
+  float phase = fmod(((float)time_diff / period_us) * 360.0, 360.0);
+  if (phase > 180.0) phase -= 360.0;
+  else if (phase < -180.0) phase += 360.0;
+  return phase;
+}
+
+
 // displayNetworkStatus
 void displayNetworkStatus() {
   tft.setTextSize(1);
   tft.setTextColor(ILI9341_DARKGREY);
-  tft.setCursor(180, 5);
+  tft.setCursor(240, 5); // [v20] 위치 수정
   tft.print("NET: OFF"); 
 }
 
+// [v20] 뒤로 가기 버튼 그리기
+void drawBackButton() {
+  tft.fillRoundRect(5, 5, 50, 30, 8, ILI9341_DARKGREY);
+  tft.setCursor(20, 12);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  tft.print("<");
+}
+
+// [v20] 공통 버튼 그리기 헬퍼
+void drawButton(int x, int y, int w, int h, String text) {
+  tft.fillRoundRect(x, y, w, h, 8, ILI9341_BLUE);
+  tft.drawRoundRect(x, y, w, h, 8, ILI9341_BLACK);
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(2);
+  // 텍스트 중앙 정렬
+  int16_t x1, y1;
+  uint16_t w1, h1;
+  tft.getTextBounds(text, 0, 0, &x1, &y1, &w1, &h1);
+  tft.setCursor(x + (w - w1) / 2, y + (h - h1) / 2);
+  tft.print(text);
+}
+
+
 // ==============================================================================
-// 5. 메인 전력 화면 그리기 (수정 없음)
+// 5. 메인 전력 화면 그리기
 // ==============================================================================
 void displayMainScreenStatic() {
-  tft.setCursor(10, 10);
+  tft.setCursor(65, 10); // [v20] 뒤로가기 버튼 고려
   tft.setTextColor(ILI9341_BLACK);
   tft.setTextSize(2);
   tft.println("MAIN POWER (Live)");
   displayNetworkStatus(); 
+  drawBackButton(); // [v20]
   
   tft.setTextSize(2);
   tft.setCursor(10, 40); tft.setTextColor(ILI9341_BLUE); tft.println("V:");
-  tft.setCursor(10, 70); tft.setTextColor(ILI9341_ORANGE); tft.println("I:");
-  tft.setCursor(10, 100); tft.setTextColor(ILI9341_DARKGREEN); tft.println("P:");
-  tft.setCursor(10, 130); tft.setTextColor(ILI9341_ORANGE); tft.println("Q:");
-  tft.setCursor(10, 160);
-  tft.setTextColor(ILI9341_MAGENTA); tft.println("PF:"); 
-  tft.setCursor(10, 190); tft.setTextColor(ILI9341_BLACK); tft.println("THD:");
-  
-  tft.setCursor(10, SCREEN_HEIGHT - 12); // 하단 팁 위치 조정
-  tft.setTextSize(1); tft.setTextColor(ILI9341_DARKGREY);
-  tft.print("Tap screen to switch view"); 
+  tft.setCursor(10, 65); tft.setTextColor(ILI9341_ORANGE); tft.println("I-M:");
+  tft.setCursor(10, 90); tft.setTextColor(ILI9341_RED); tft.println("I-1:");
+  tft.setCursor(10, 115); tft.setTextColor(ILI9341_GREEN); tft.println("I-2:");
+  tft.setCursor(10, 140); tft.setTextColor(ILI9341_DARKGREEN); tft.println("P:");
+  tft.setCursor(10, 165); tft.setTextColor(ILI9341_MAGENTA); tft.println("PF:"); 
+  tft.setCursor(10, 190); tft.setTextColor(ILI9341_ORANGE); tft.println("Q:");
+  tft.setCursor(10, 215); tft.setTextColor(ILI9341_BLACK); tft.println("THD:");
 }
 
 // ==============================================================================
-// 6. 메인 전력 화면 "값" 업데이트 (수정 없음)
+// 6. 메인 전력 화면 "값" 업데이트
 // ==============================================================================
 void displayMainScreenValues() {
+  // (v19와 동일, 헬퍼 함수가 깜빡임 방지)
   tft.setTextSize(2);
   char buffer[20];
   
-  // V_rms
   tft.fillRect(45, 40, 180, 20, ILI9341_WHITE); 
   tft.setTextColor(ILI9341_BLUE); 
   tft.setCursor(45, 40);
   dtostrf(V_rms, 4, 1, buffer);
   tft.print(buffer); tft.print(" V");
 
-  // I_rms
-  tft.fillRect(45, 70, 180, 20, ILI9341_WHITE); 
+  tft.fillRect(75, 65, 180, 20, ILI9341_WHITE); 
   tft.setTextColor(ILI9341_ORANGE);
-  tft.setCursor(45, 70);
+  tft.setCursor(75, 65);
   if (I_rms < 1.0) { 
     dtostrf(I_rms * 1000.0, 4, 0, buffer);
     tft.print(buffer); tft.print(" mA");
@@ -413,10 +610,31 @@ void displayMainScreenValues() {
     tft.print(buffer); tft.print(" A");
   }
 
-  // P_real
-  tft.fillRect(45, 100, 180, 20, ILI9341_WHITE); 
+  tft.fillRect(75, 90, 180, 20, ILI9341_WHITE); 
+  tft.setTextColor(ILI9341_RED);
+  tft.setCursor(75, 90);
+  if (I_rms_load1 < 1.0) { 
+    dtostrf(I_rms_load1 * 1000.0, 4, 0, buffer);
+    tft.print(buffer); tft.print(" mA");
+  } else { 
+    dtostrf(I_rms_load1, 4, 2, buffer);
+    tft.print(buffer); tft.print(" A");
+  }
+
+  tft.fillRect(75, 115, 180, 20, ILI9341_WHITE); 
+  tft.setTextColor(ILI9341_GREEN);
+  tft.setCursor(75, 115);
+  if (I_rms_load2 < 1.0) { 
+    dtostrf(I_rms_load2 * 1000.0, 4, 0, buffer);
+    tft.print(buffer); tft.print(" mA");
+  } else { 
+    dtostrf(I_rms_load2, 4, 2, buffer);
+    tft.print(buffer); tft.print(" A");
+  }
+
+  tft.fillRect(45, 140, 180, 20, ILI9341_WHITE); 
   tft.setTextColor(ILI9341_DARKGREEN);
-  tft.setCursor(45, 100);
+  tft.setCursor(45, 140);
   if (P_real >= 1000.0) { 
     dtostrf(P_real / 1000.0, 4, 2, buffer);
     tft.print(buffer); tft.print(" kW");
@@ -425,10 +643,15 @@ void displayMainScreenValues() {
     tft.print(buffer); tft.print(" W");
   }
 
-  // Q_reactive
-  tft.fillRect(45, 130, 180, 20, ILI9341_WHITE); 
+  tft.fillRect(45, 165, 180, 20, ILI9341_WHITE); 
+  tft.setTextColor(ILI9341_MAGENTA);
+  tft.setCursor(45, 165);
+  dtostrf(PF, 4, 2, buffer);
+  tft.print(buffer);
+
+  tft.fillRect(45, 190, 180, 20, ILI9341_WHITE); 
   tft.setTextColor(ILI9341_ORANGE);
-  tft.setCursor(45, 130);
+  tft.setCursor(45, 190);
   if (Q_reactive >= 1000.0) { 
     dtostrf(Q_reactive / 1000.0, 4, 2, buffer);
     tft.print(buffer); tft.print(" kVAR");
@@ -437,137 +660,178 @@ void displayMainScreenValues() {
     tft.print(buffer); tft.print(" VAR");
   }
 
-  // PF
-  tft.fillRect(45, 160, 180, 20, ILI9341_WHITE); 
-  tft.setTextColor(ILI9341_MAGENTA);
-  tft.setCursor(45, 160);
-  dtostrf(PF, 4, 2, buffer);
-  tft.print(buffer);
-
-  // THD
-  tft.fillRect(60, 190, 170, 20, ILI9341_WHITE); 
+  tft.fillRect(60, 215, 170, 20, ILI9341_WHITE); 
   tft.setTextColor(ILI9341_BLACK);
-  tft.setCursor(60, 190);
+  tft.setCursor(60, 215);
   dtostrf(THD_value, 4, 1, buffer);
   tft.print(buffer); tft.print(" %"); 
 }
 
 // ==============================================================================
-// 7. 위상차 화면 그리기 (수정 없음)
+// 7. [v19] 위상차 화면 그리기
 // ==============================================================================
 void displayPhaseScreenStatic() {
-  tft.setCursor(10, 10);
+  tft.setCursor(65, 10); // [v20]
   tft.setTextColor(ILI9341_BLACK);
   tft.setTextSize(2);
-  tft.println("PHASE DIFFERENCE");
-  
+  tft.println("PHASOR DIAGRAM"); 
   displayNetworkStatus();
+  drawBackButton(); // [v20]
   
   tft.setTextSize(2);
-  tft.setCursor(10, 70); tft.setTextColor(ILI9341_BLACK); tft.println("Phase:"); 
-  tft.setCursor(10, 130); tft.setTextColor(ILI9341_BLACK); tft.println("Status:");
+  tft.setCursor(10, 50); tft.setTextColor(ILI9341_MAGENTA); tft.println("PF:"); 
+  tft.setCursor(10, 75); tft.setTextColor(ILI9341_BLACK); tft.println("Status:");
   
-  tft.setCursor(10, SCREEN_HEIGHT - 12); // 하단 팁 위치 조정
-  tft.setTextSize(1); tft.setTextColor(ILI9341_DARKGREY);
-  tft.print("Tap screen to switch view");
+  tft.setTextSize(1);
+  tft.setCursor(10, 110); tft.setTextColor(ILI9341_BLACK); tft.print("--- Phase (deg) ---");
+  tft.setTextSize(2);
+  tft.setCursor(10, 130); tft.setTextColor(ILI9341_ORANGE); tft.println("I-M:");
+  tft.setCursor(10, 155); tft.setTextColor(ILI9341_RED); tft.println("I-1:");
+  tft.setCursor(10, 180); tft.setTextColor(ILI9341_GREEN); tft.println("I-2:");
+
+  tft.drawCircle(PHASOR_CX, PHASOR_CY, PHASOR_RADIUS, ILI9341_LIGHTGREY);
+  tft.drawCircle(PHASOR_CX, PHASOR_CY, PHASOR_RADIUS / 2, ILI9341_LIGHTGREY);
+  tft.drawFastHLine(PHASOR_CX - PHASOR_RADIUS, PHASOR_CY, PHASOR_RADIUS * 2, ILI9341_LIGHTGREY);
+  tft.drawFastVLine(PHASOR_CX, PHASOR_CY - PHASOR_RADIUS, PHASOR_RADIUS * 2, ILI9341_LIGHTGREY);
+  tft.setTextSize(1);
+  tft.setTextColor(ILI9341_DARKGREY);
+  tft.setCursor(PHASOR_CX + PHASOR_RADIUS + 3, PHASOR_CY - 3);
+  tft.print("0");
+
+  int legendY = 195;
+  tft.drawRect(155, legendY, 160, 40, ILI9341_DARKGREY);
+  tft.drawFastHLine(160, legendY + 19, 10, ILI9341_BLUE);
+  tft.setCursor(175, legendY + 4); tft.print("V");
+  tft.drawFastHLine(200, legendY + 19, 10, ILI9341_ORANGE);
+  tft.setCursor(215, legendY + 4); tft.print("I-M");
+  tft.drawFastHLine(240, legendY + 19, 10, ILI9341_RED);
+  tft.setCursor(255, legendY + 4); tft.print("I-1");
+  tft.drawFastHLine(280, legendY + 19, 10, ILI9341_GREEN);
+  tft.setCursor(295, legendY + 4); tft.print("I-2");
   
-  prev_phase_degrees = phase_degrees;
-  prev_lead_lag_status = lead_lag_status; 
+  prev_phase_degrees = 0.0;
+  prev_lead_lag_status = "---"; 
+  prev_phase_main_deg = 0.0;
+  prev_phase_load1_deg = 0.0;
+  prev_phase_load2_deg = 0.0;
+  prev_v_x = PHASOR_CX; prev_v_y = PHASOR_CY;
+  prev_im_x = PHASOR_CX; prev_im_y = PHASOR_CY;
+  prev_i1_x = PHASOR_CX; prev_i1_y = PHASOR_CY;
+  prev_i2_x = PHASOR_CX; prev_i2_y = PHASOR_CY;
 }
 
 // ==============================================================================
-// 8. 위상차 화면 "값" 업데이트 함수 (수정 없음)
+// 8. [v19] 위상차 화면 "값" 업데이트 함수
 // ==============================================================================
 void displayPhaseScreenValues() {
-  tft.setTextSize(3);
-  printTFTValue(10, 100, phase_degrees, prev_phase_degrees, 1, ILI9341_BLUE, " deg"); 
-  printTFTValue(10, 160, lead_lag_status, prev_lead_lag_status, ILI9341_ORANGE);
   
-  prev_phase_degrees = phase_degrees;
+  tft.setTextSize(2);
+  printTFTValue(60, 50, PF, prev_phase_degrees, 2, ILI9341_MAGENTA, "");
+  printTFTValue(10, 100, lead_lag_status, prev_lead_lag_status, ILI9341_BLACK); 
+
+  printTFTValue(60, 130, phase_main_deg, prev_phase_main_deg, 1, ILI9341_ORANGE, "d");
+  printTFTValue(60, 155, phase_load1_deg, prev_phase_load1_deg, 1, ILI9341_RED, "d");
+  printTFTValue(60, 180, phase_load2_deg, prev_phase_load2_deg, 1, ILI9341_GREEN, "d");
+
+  tft.drawLine(PHASOR_CX, PHASOR_CY, prev_v_x, prev_v_y, ILI9341_WHITE);
+  tft.drawLine(PHASOR_CX, PHASOR_CY, prev_im_x, prev_im_y, ILI9341_WHITE);
+  tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i1_x, prev_i1_y, ILI9341_WHITE);
+  tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i2_x, prev_i2_y, ILI9341_WHITE);
+
+  float v_len = PHASOR_RADIUS;
+  float im_len = constrain((I_rms / PHASOR_MAX_CURRENT) * PHASOR_RADIUS, 0, PHASOR_RADIUS);
+  float i1_len = constrain((I_rms_load1 / PHASOR_MAX_CURRENT) * PHASOR_RADIUS, 0, PHASOR_RADIUS);
+  float i2_len = constrain((I_rms_load2 / PHASOR_MAX_CURRENT) * PHASOR_RADIUS, 0, PHASOR_RADIUS);
+
+  int v_x = PHASOR_CX + (int)(v_len * cos(0));
+  int v_y = PHASOR_CY - (int)(v_len * sin(0));
+  int im_x = PHASOR_CX + (int)(im_len * cos(phase_main_deg * (M_PI / 180.0)));
+  int im_y = PHASOR_CY - (int)(im_len * sin(phase_main_deg * (M_PI / 180.0)));
+  int i1_x = PHASOR_CX + (int)(i1_len * cos(phase_load1_deg * (M_PI / 180.0)));
+  int i1_y = PHASOR_CY - (int)(i1_len * sin(phase_load1_deg * (M_PI / 180.0)));
+  int i2_x = PHASOR_CX + (int)(i2_len * cos(phase_load2_deg * (M_PI / 180.0)));
+  int i2_y = PHASOR_CY - (int)(i2_len * sin(phase_load2_deg * (M_PI / 180.0)));
+
+  tft.drawLine(PHASOR_CX, PHASOR_CY, v_x, v_y, ILI9341_BLUE);
+  tft.drawLine(PHASOR_CX, PHASOR_CY, im_x, im_y, ILI9341_ORANGE);
+  tft.drawLine(PHASOR_CX, PHASOR_CY, i1_x, i1_y, ILI9341_RED);
+  tft.drawLine(PHASOR_CX, PHASOR_CY, i2_x, i2_y, ILI9341_GREEN);
+  
+  prev_phase_degrees = PF;
   prev_lead_lag_status = lead_lag_status; 
+  prev_phase_main_deg = phase_main_deg;
+  prev_phase_load1_deg = phase_load1_deg;
+  prev_phase_load2_deg = phase_load2_deg;
+  
+  prev_v_x = v_x; prev_v_y = v_y;
+  prev_im_x = im_x; prev_im_y = im_y;
+  prev_i1_x = i1_x; prev_i1_y = i1_y;
+  prev_i2_x = i2_x; prev_i2_y = i2_y;
 }
 
 // ==============================================================================
-// 9. [Test.ino 통합] 60Hz 0점 통과(Zero-Crossing) 대기 함수 
-// (Test.ino의 'waitForVoltageZeroCross' 함수  내용)
+// 9. 60Hz 0점 통과(Zero-Crossing) 대기 함수 
 // ==============================================================================
 void waitForVoltageZeroCross() {
   long startTime = micros();
-  long timeout = 20000; // 20ms (60Hz 주기 16667µs보다 약간 김) 
-
+  long timeout = 20000; 
   int V_ac_bits_prev = 0;
   int V_raw = 0;
   int V_ac_bits = 0; 
   
-  // 1. 신호가 음수(-) 영역에 있는지 먼저 확인 
   while (true) {
     V_raw = analogRead(VOLTAGE_PIN);
     V_ac_bits = V_raw - (int)V_ADC_MIDPOINT; 
-    
-    if (V_ac_bits < -50) { // (임의의 임계값 -50) 
+    if (V_ac_bits < -50) {
        V_ac_bits_prev = V_ac_bits;
-       break; // 음수 영역 진입 확인 
+       break;
     }
-    // 20ms 내에 음수 영역에 진입하지 못하면 타임아웃
-    if (micros() - startTime > timeout) {
-      Serial.println("Trigger Timeout (Waiting for negative)");
-      return; 
-    }
+    if (micros() - startTime > timeout) return; 
   }
 
-  // 2. 신호가 음수(-)에서 양수(+)로 0점을 통과할 때까지 대기
   while (true) {
     V_raw = analogRead(VOLTAGE_PIN);
     V_ac_bits = V_raw - (int)V_ADC_MIDPOINT; 
-    
-    // 이전 값은 0보다 작은데, 현재 값이 0보다 크거나 같으면 0점 통과
-    if (V_ac_bits_prev < 0 && V_ac_bits >= 0) {
-      return; // 0점 통과! 캡처 시작 
-    }
+    if (V_ac_bits_prev < 0 && V_ac_bits >= 0) return;
     V_ac_bits_prev = V_ac_bits;
-    
-    // 2차 타임아웃 (무한 루프 방지) 
-    if (micros() - startTime > timeout * 2) {
-      Serial.println("Trigger Timeout (Waiting for positive)");
-      return; 
-    }
+    if (micros() - startTime > timeout * 2) return; 
   }
 }
 
 
 // ==============================================================================
-// 10. [Test.ino 통합] 공통 파형 화면 (정적 그리드)
-// (Test.ino의 'drawWaveformGridAndLabels' 기반으로 수정)
+// 10. [v19] 공통 파형 화면 (정적 그리드 + Vpk/Ipk 라벨)
 // ==============================================================================
 void drawWaveformGridAndLabels() {
-  // tft.fillScreen(ILI9341_WHITE); // 화면 전환 시 이미 지워짐 
   
-  tft.setCursor(10, 10);
+  tft.setCursor(65, 10); // [v20]
   tft.setTextColor(ILI9341_BLACK);
   tft.setTextSize(2);
-  tft.println("V/I WAVEFORM (60Hz Sync)"); // [Test.ino] 제목 수정 
-  
+  tft.println("V/I WAVEFORM (60Hz Sync)");
   displayNetworkStatus(); 
+  drawBackButton(); // [v20]
   
-  // --- 그래프 영역 ---
+  tft.setTextSize(1);
+  tft.setTextColor(ILI9341_BLUE);
+  tft.setCursor(150, 25);
+  tft.print("Vpk:");
+  tft.setTextColor(ILI9341_ORANGE);
+  tft.setCursor(150, 40);
+  tft.print("Ipk:");
+
   tft.drawRect(PLOT_X_START, PLOT_Y_START, PLOT_WIDTH, (PLOT_Y_END - PLOT_Y_START), ILI9341_LIGHTGREY); 
   tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, ILI9341_LIGHTGREY); 
   tft.drawFastVLine(PLOT_X_START, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), ILI9341_DARKGREY); 
   tft.drawFastVLine(PLOT_X_END, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), ILI9341_DARKGREY); 
 
-  // --- 정적 Y축 라벨 (0점) ---
   tft.setTextSize(1);
-  // 0A
   tft.setTextColor(ILI9341_ORANGE);
   tft.setCursor(0, PLOT_Y_CENTER - 4); 
   tft.print("0A"); 
-  
-  // 0V
   tft.setTextColor(ILI9341_BLUE);
   tft.setCursor(PLOT_X_END + 5, PLOT_Y_CENTER - 4); 
   tft.print("0V"); 
 
-  // [Test.ino 통합] 하단 팁 수정 
   tft.setCursor(10, SCREEN_HEIGHT - 12);
   tft.setTextSize(1);
   tft.setTextColor(ILI9341_DARKGREY);
@@ -577,146 +841,153 @@ void drawWaveformGridAndLabels() {
 }
 
 // ==============================================================================
-// 11. [v16] 동적 Y축 라벨 업데이트 함수 (수정 없음 - 번호만 10->11로 변경)
-// (Test.ino의 'updateYAxisLabels'와 기능 동일)
+// 11. 동적 Y축 라벨 업데이트 함수
 // ==============================================================================
 void updateYAxisLabels() {
   tft.setTextSize(1);
   char buffer[10]; 
   
-  // --- 이전 라벨 지우기 ---
   tft.fillRect(0, PLOT_Y_START, PLOT_X_START - 1, 20, ILI9341_WHITE); 
   tft.fillRect(0, PLOT_Y_END - 10, PLOT_X_START - 1, 10, ILI9341_WHITE); 
   tft.fillRect(PLOT_X_END + 1, PLOT_Y_START, SCREEN_WIDTH - PLOT_X_END - 1, 20, ILI9341_WHITE); 
   tft.fillRect(PLOT_X_END + 1, PLOT_Y_END - 10, SCREEN_WIDTH - PLOT_X_END - 1, 10, ILI9341_WHITE); 
   
-  // --- 새 라벨 그리기 --- 
   tft.setTextColor(ILI9341_ORANGE);
-  if (I_peak_dynamic < 1.0) { 
+  if (I_peak_dynamic < 1.0) { // [v21-FIX] 'I_peak_dynamic' was not declared in this scope
     dtostrf(I_peak_dynamic * 1000, 3, 0, buffer);
-    tft.setCursor(0, PLOT_Y_START + 5);
-    tft.print("+"); tft.print(buffer); 
-    tft.setCursor(0, PLOT_Y_END - 10);
-    tft.print("-"); tft.print(buffer); 
+    tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); 
+    tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); 
   } else { 
     dtostrf(I_peak_dynamic, 3, 1, buffer);
-    tft.setCursor(0, PLOT_Y_START + 5);
-    tft.print("+"); tft.print(buffer); 
-    tft.setCursor(0, PLOT_Y_END - 10);
-    tft.print("-"); tft.print(buffer); 
+    tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); 
+    tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); 
   }
 
   tft.setTextColor(ILI9341_BLUE);
-  dtostrf(V_peak_dynamic, 3, 0, buffer);
-  tft.setCursor(PLOT_X_END + 5, PLOT_Y_START + 5);
-  tft.print("+"); tft.print(buffer); 
-  tft.setCursor(PLOT_X_END + 5, PLOT_Y_END - 10);
-  tft.print("-"); tft.print(buffer); 
+  dtostrf(V_peak_dynamic, 3, 0, buffer); // [v21-FIX] 'V_peak_dynamic' was not declared in this scope
+  tft.setCursor(PLOT_X_END + 5, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); 
+  tft.setCursor(PLOT_X_END + 5, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); 
 }
 
 
 // ==============================================================================
-// 12. [v2] 경고 팝업 화면 (수정 없음 - 번호만 11->12로 변경)
+// 12. 경고 팝업 화면
 // ==============================================================================
 void displayWarningScreenStatic() {
   tft.fillScreen(ILI9341_WHITE);
-  tft.drawRect(20, 50, 200, 220, ILI9341_RED); 
-  tft.drawRect(21, 51, 198, 218, ILI9341_RED); 
-  
+  tft.drawRect(20, 50, 280, 140, ILI9341_RED);
+  tft.drawRect(21, 51, 278, 138, ILI9341_RED);
   tft.setTextColor(ILI9341_RED);
-  tft.setTextSize(3); tft.setCursor(50, 80); tft.print("WARNING");
-  
+  tft.setTextSize(3); tft.setCursor(80, 70); tft.print("WARNING");
   tft.setTextColor(ILI9341_BLACK);
-  tft.setTextSize(2); tft.setCursor(40, 130); tft.print(warningMessage);
-  
+  tft.setTextSize(2); tft.setCursor(60, 110); tft.print(warningMessage);
   tft.setTextSize(3); 
   if (warningMessage.startsWith("OVER VOLTAGE")) {
-    tft.setCursor(60, 170); tft.print(V_rms, 1); tft.print(" V"); 
+    tft.setCursor(80, 150); tft.print(V_rms, 1); tft.print(" V");
   } else {
-    tft.setCursor(60, 170); tft.print(I_rms, 2); tft.print(" A"); 
+    tft.setCursor(80, 150); tft.print(I_rms, 2); tft.print(" A");
   }
-  
   tft.setTextColor(ILI9341_DARKGREY);
-  tft.setTextSize(1); tft.setCursor(60, 240);
+  tft.setTextSize(1); tft.setCursor(100, 210);
   tft.print("Tap screen to reset"); 
 }
 
 
 // ==============================================================================
-// 13. 실시간 전력 계산 (메인/위상차 화면 공용) (v17과 동일 - 번호만 12->13)
+// 13. [v19] 실시간 전력 계산 (모든 위상차 계산 포함)
 // ==============================================================================
 void calculatePowerMetrics() {
   
   unsigned long V_sq_sum = 0; 
   unsigned long I_sq_sum = 0; 
+  unsigned long I_sq_sum_load1 = 0;
+  unsigned long I_sq_sum_load2 = 0;
   long P_sum = 0; 
   int V_ac_max = 0;
   int I_ac_max = 0;
+
   int V_ac_bits_prev = 0; 
   int I_ac_bits_prev = 0; 
-  long time_V_cross = -1;
-  long time_I_cross = -1;
-  bool found_V_cross = false; 
-  bool found_I_cross = false; 
+  int I1_ac_bits_prev = 0;
+  int I2_ac_bits_prev = 0;
+  long time_V_cross = -1, time_I_cross = -1, time_I1_cross = -1, time_I2_cross = -1;
+  bool found_V_cross = false, found_I_cross = false, found_I1_cross = false, found_I2_cross = false; 
+
   unsigned long startTimePass = micros();
   
-  // [v18] THD 값 업데이트
-  THD_value = thd_v_value * 100.0; // THD-V 값을 %로 표시 
+  THD_value = thd_v_value * 100.0;
   
-  // --- [v17] 퍼지 로직 실행 ---
   runFuzzyLogic(); 
 
   for (int i = 0; i < SAMPLES_PER_CALC; i++) { 
     int V_raw = analogRead(VOLTAGE_PIN); 
     int I_raw = analogRead(CURRENT_PIN); 
+    int I_raw_load1 = analogRead(CURRENT_PIN_LOAD1);
+    int I_raw_load2 = analogRead(CURRENT_PIN_LOAD2);
+    
     int V_ac_bits = V_raw - (int)V_ADC_MIDPOINT;
     int I_ac_bits = I_raw - (int)I_ADC_MIDPOINT;
+    int I_ac_bits_load1 = I_raw_load1 - (int)I_ADC_MIDPOINT;
+    int I_ac_bits_load2 = I_raw_load2 - (int)I_ADC_MIDPOINT;
     
     V_sq_sum += (unsigned long)V_ac_bits * V_ac_bits; 
     I_sq_sum += (unsigned long)I_ac_bits * I_ac_bits; 
+    I_sq_sum_load1 += (unsigned long)I_ac_bits_load1 * I_ac_bits_load1;
+    I_sq_sum_load2 += (unsigned long)I_ac_bits_load2 * I_ac_bits_load2;
     P_sum += (long)V_ac_bits * I_ac_bits; 
 
     if (abs(V_ac_bits) > V_ac_max) V_ac_max = abs(V_ac_bits); 
     if (abs(I_ac_bits) > I_ac_max) I_ac_max = abs(I_ac_bits); 
     
     if (i < (SAMPLE_PERIOD_US * 1000 / FREQUENCY / SAMPLE_PERIOD_US)) { 
+      unsigned long crossTime = micros();
       if (!found_V_cross && V_ac_bits_prev < 0 && V_ac_bits >= 0) {
-        time_V_cross = micros();
+        time_V_cross = crossTime;
         found_V_cross = true; 
       }
       if (!found_I_cross && I_ac_bits_prev < 0 && I_ac_bits >= 0) {
-        time_I_cross = micros();
+        time_I_cross = crossTime;
         found_I_cross = true; 
+      }
+      if (!found_I1_cross && I1_ac_bits_prev < 0 && I_ac_bits_load1 >= 0) {
+        time_I1_cross = crossTime;
+        found_I1_cross = true; 
+      }
+      if (!found_I2_cross && I2_ac_bits_prev < 0 && I_ac_bits_load2 >= 0) {
+        time_I2_cross = crossTime;
+        found_I2_cross = true; 
       }
     }
     V_ac_bits_prev = V_ac_bits; 
     I_ac_bits_prev = I_ac_bits; 
+    I1_ac_bits_prev = I_ac_bits_load1;
+    I2_ac_bits_prev = I_ac_bits_load2;
     
     while(micros() - startTimePass < (i + 1) * SAMPLE_PERIOD_US); 
     
-    if (i % 20 == 0) {
-      checkTouchInput();
-      if (screenNeedsRedraw || warningActive) return; 
-    }
+    // [v20] 터치 확인은 메인 루프로 이동됨
   }
 
   float V_rms_adc = sqrt((float)V_sq_sum / SAMPLES_PER_CALC);
   float I_rms_adc = sqrt((float)I_sq_sum / SAMPLES_PER_CALC); 
+  float I_rms_adc_load1 = sqrt((float)I_sq_sum_load1 / SAMPLES_PER_CALC);
+  float I_rms_adc_load2 = sqrt((float)I_sq_sum_load2 / SAMPLES_PER_CALC);
   float P_avg_adc = (float)P_sum / SAMPLES_PER_CALC;
 
-  V_rms = V_rms_adc * V_CALIB_RMS;
-  I_rms = I_rms_adc * I_CALIB_RMS; 
-  P_real = P_avg_adc * V_CALIB_RMS * I_CALIB_RMS;
-
-  V_rms -= V_RMS_OFFSET_CORRECTION;
-  I_rms -= I_RMS_OFFSET_CORRECTION; 
+  // [v20] 실시간 설정 변수(V_CALIB_RMS, I_CALIB_RMS) 사용
+  V_rms = (V_rms_adc * V_CALIB_RMS) - V_RMS_OFFSET_CORRECTION;
+  I_rms = (I_rms_adc * I_CALIB_RMS) - I_RMS_OFFSET_CORRECTION; 
+  I_rms_load1 = (I_rms_adc_load1 * I_CALIB_RMS) - I_RMS_OFFSET_CORRECTION;
+  I_rms_load2 = (I_rms_adc_load2 * I_CALIB_RMS) - I_RMS_OFFSET_CORRECTION;
+  P_real = P_avg_adc * V_CALIB_RMS * I_CALIB_RMS; 
   
   if (V_rms < 0) V_rms = 0; 
   if (I_rms < 0) I_rms = 0; 
+  if (I_rms_load1 < 0) I_rms_load1 = 0;
+  if (I_rms_load2 < 0) I_rms_load2 = 0;
 
-  V_peak_dynamic = (V_ac_max * V_CALIB_RMS) * 1.1; 
-  I_peak_dynamic = (I_ac_max * I_CALIB_RMS) * 1.1; 
-
+  V_peak_dynamic = (V_ac_max * V_CALIB_RMS) * 1.1; // [v21-FIX] 'V_peak_dynamic' was not declared in this scope
+  I_peak_dynamic = (I_ac_max * I_CALIB_RMS) * 1.1; // [v21-FIX] 'I_peak_dynamic' was not declared in this scope
   if (V_peak_dynamic < 50.0) V_peak_dynamic = 50.0; 
   if (I_peak_dynamic < 1.0) I_peak_dynamic = 1.0; 
 
@@ -731,39 +1002,35 @@ void calculatePowerMetrics() {
     Q_reactive = sqrt(max(0.0, S_apparent * S_apparent - P_real * P_real)); 
   }
 
-  if (found_V_cross && found_I_cross) { 
-    long time_diff = time_I_cross - time_V_cross;
-    float period_us = 1000000.0 / FREQUENCY; 
-    phase_degrees = fmod(((float)time_diff / period_us) * 360.0, 360.0); 
-    if (phase_degrees > 180.0) phase_degrees -= 360.0; 
-    else if (phase_degrees < -180.0) phase_degrees += 360.0; 
-
-    if (phase_degrees > 2.0) { lead_lag_status = "Lag"; } 
-    else if (phase_degrees < -2.0) { lead_lag_status = "Lead"; 
-      phase_degrees = -phase_degrees; } 
-    else { lead_lag_status = "---"; phase_degrees = 0.0; 
-    }
-    
-    float pf_angle = acos(abs(PF)) * (180.0 / M_PI); 
-    phase_degrees = pf_angle; 
-    
-  } else { 
-    phase_degrees = acos(abs(PF)) * (180.0 / M_PI); 
-    lead_lag_status = (abs(PF) > 0.98) ? "---" : "Lag/Lead"; 
+  float period_us = 1000000.0 / FREQUENCY; 
+  phase_main_deg = 0.0;
+  phase_load1_deg = 0.0;
+  phase_load2_deg = 0.0;
+  
+  if (found_V_cross) {
+    if (found_I_cross) phase_main_deg = calculatePhase(time_I_cross - time_V_cross, period_us);
+    if (found_I1_cross) phase_load1_deg = calculatePhase(time_I1_cross - time_V_cross, period_us);
+    if (found_I2_cross) phase_load2_deg = calculatePhase(time_I2_cross - time_V_cross, period_us);
   }
 
-  if (I_rms < 0.05) { // 50mA 미만
+  phase_degrees = acos(abs(PF)) * (180.0 / M_PI);
+  if (phase_main_deg < -2.0) lead_lag_status = "Lead";
+  else if (phase_main_deg > 2.0) lead_lag_status = "Lag";
+  else lead_lag_status = "---";
+
+  if (I_rms < 0.05) {
      phase_degrees = 0.0;
-     lead_lag_status = "---"; PF = 1.0; P_real = 0.0; Q_reactive = 0.0; 
+     phase_main_deg = 0.0;
+     lead_lag_status = "---"; 
+     PF = (V_rms > 10.0) ? 1.0 : 0.0;
+     P_real = 0.0; 
+     Q_reactive = 0.0; 
   }
+  if (I_rms_load1 < 0.05) { I_rms_load1 = 0.0; phase_load1_deg = 0.0; }
+  if (I_rms_load2 < 0.05) { I_rms_load2 = 0.0; phase_load2_deg = 0.0; }
 
-  // --- [v17] 퍼지 로직 실행 ---
-  runFuzzyLogic(); 
-  // --- [v17] ---
-
-  // ... (경고 로직) ...
+  // [v20] 실시간 설정 변수(VOLTAGE_THRESHOLD) 사용
   if (V_rms > VOLTAGE_THRESHOLD) {
-   // [v17-2Relay] 메인 릴레이 대신 부하 1, 2를 동시 차단 (HIGH = TRIP)
     digitalWrite(RELAY_1_PIN, HIGH);
     digitalWrite(RELAY_2_PIN, HIGH); 
     warningMessage = "OVER VOLTAGE!"; 
@@ -773,393 +1040,408 @@ void calculatePowerMetrics() {
 }
 
 // ==============================================================================
-// 14. 메인 화면 실행 함수 (v16과 동일 - 번호만 13->14)
+// 14. 메인 화면 실행 함수
 // ==============================================================================
 void runMainPowerCalculation() {
   calculatePowerMetrics();
   if (screenNeedsRedraw || warningActive) return;
-  displayMainScreenValues(); 
+  displayMainScreenValues();
 }
 
 // ==============================================================================
-// 15. 위상차 화면 실행 함수 (v16과 동일 - 번호만 14->15)
+// 15. 위상차 화면 실행 함수
 // ==============================================================================
 void runPhaseCalculation() {
   calculatePowerMetrics();
   if (screenNeedsRedraw || warningActive) return;
-  displayPhaseScreenValues(); 
+  displayPhaseScreenValues();
 }
 
 // ==============================================================================
-// 16. 파형 그리기 루프 (프레임 기반) - [Test.ino의 6번 항목으로 대체됨]
-// (이 함수는 0점 통과 '이후'에 호출됩니다)
+// 16. [v19] 파형 그리기 루프
 // ==============================================================================
 void runCombinedWaveformLoop() {
-  // 1. 동적 스케일링 값 계산 (현재 Y축 라벨 기준)
-  float volts_to_pixels_scale = (V_peak_dynamic < 1.0) ? 
-                                0 : (PLOT_HEIGHT_HALF / V_peak_dynamic);
-  float amps_to_pixels_scale = (I_peak_dynamic < 0.1) ? 0 : (PLOT_HEIGHT_HALF / I_peak_dynamic);
+  float volts_to_pixels_scale = (V_peak_dynamic < 1.0) ? 0 : (PLOT_HEIGHT_HALF / V_peak_dynamic); // [v21-FIX] 'V_peak_dynamic' was not declared in this scope
+  float amps_to_pixels_scale = (I_peak_dynamic < 0.1) ? 0 : (PLOT_HEIGHT_HALF / I_peak_dynamic); // [v21-FIX] 'I_peak_dynamic' was not declared in this scope
 
-  // 새 프레임의 V/I 피크 값 추적용
   float new_frame_V_peak = 0.0;
   float new_frame_I_peak = 0.0;
   
-  // 새 프레임의 Y-위치 값을 저장할 임시 버퍼
   int new_y_v[PLOT_WIDTH];
   int new_y_i[PLOT_WIDTH];
 
   unsigned long startTime = micros();
 
-  // 2. --- 새 프레임 캡처 (총 PLOT_WIDTH 개의 샘플) ---
-  // (이 루프는 0점 통과 '직후'에 시작됩니다)
   for (int i = 0; i < PLOT_WIDTH; i++) {
-    // 2-1. 샘플 읽기
     int V_raw = analogRead(VOLTAGE_PIN);
-    int I_raw = analogRead(CURRENT_PIN); // [수정] A1 핀에서 읽음 (Test.ino 원본 주석)
+    int I_raw = analogRead(CURRENT_PIN);
     int V_ac_bits = V_raw - (int)V_ADC_MIDPOINT;
-    int I_ac_bits = I_raw - (int)I_ADC_MIDPOINT; // VCC/2 바이어스 가정 (Test.ino 원본 주석)
+    int I_ac_bits = I_raw - (int)I_ADC_MIDPOINT;
     
-    // [수정] 새로운 보정 상수로 계산 (Test.ino 원본 로직)
-    // (Wattmeter.ino에 전역으로 정의된 V_CALIB_RMS, I_CALIB_RMS,
-    //  V_RMS_OFFSET_CORRECTION, I_RMS_OFFSET_CORRECTION 값을 사용합니다)
+    // [v20] 실시간 설정 변수(V_CALIB_RMS, I_CALIB_RMS) 사용
     float V_mains_instant = V_ac_bits * V_CALIB_RMS + V_RMS_OFFSET_CORRECTION;
     float I_mains_instant = I_ac_bits * I_CALIB_RMS - I_RMS_OFFSET_CORRECTION;
 
-    // 2-2. 새 프레임 피크 값 업데이트
-    if (abs(V_mains_instant) > new_frame_V_peak) {
-      new_frame_V_peak = abs(V_mains_instant);
-    }
-    if (abs(I_mains_instant) > new_frame_I_peak) {
-      new_frame_I_peak = abs(I_mains_instant);
-    }
+    if (abs(V_mains_instant) > new_frame_V_peak) new_frame_V_peak = abs(V_mains_instant);
+    if (abs(I_mains_instant) > new_frame_I_peak) new_frame_I_peak = abs(I_mains_instant);
 
-    // 2-3. Y-위치 계산 및 버퍼에 저장
     int y_pos_v = PLOT_Y_CENTER - (int)(V_mains_instant * volts_to_pixels_scale);
     new_y_v[i] = constrain(y_pos_v, PLOT_Y_START, PLOT_Y_END);
-    
     int y_pos_i = PLOT_Y_CENTER - (int)(I_mains_instant * amps_to_pixels_scale);
     new_y_i[i] = constrain(y_pos_i, PLOT_Y_START, PLOT_Y_END);
     
-    // 2-4. [핵심] 사용자가 설정한 샘플링 주기에 맞춰 대기
     while(micros() - startTime < (i + 1) * WAVEFORM_SAMPLE_PERIOD_US);
   }
-  // --- 캡처 완료 ---
 
-
-  // 3. --- 그리기 (수정: 픽셀 대신 lineTo로 연결) ---
-  tft.startWrite(); // SPI 트랜잭션 시작
-
-  // 3-1. 0점 라인 먼저 복원 (매 프레임마다)
+  tft.startWrite(); 
   tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, ILI9341_LIGHTGREY);
-
-  // [수정] 픽셀 대신 line을 사용하여 파형을 연결
-  for (int i = 1; i < PLOT_WIDTH; i++) { // i=1부터 시작
+  for (int i = 1; i < PLOT_WIDTH; i++) {
       int x_curr = PLOT_X_START + i;
       int x_prev = PLOT_X_START + i - 1;
-
-      // 3-2. 이전 '라인' 지우기 (흰색)
-      // (0점 라인과 겹치는 부분은 지우지 않도록)
       if(last_frame_y_v[i] != PLOT_Y_CENTER || last_frame_y_v[i-1] != PLOT_Y_CENTER) {
           tft.drawLine(x_prev, last_frame_y_v[i-1], x_curr, last_frame_y_v[i], ILI9341_WHITE);
       }
       if(last_frame_y_i[i] != PLOT_Y_CENTER || last_frame_y_i[i-1] != PLOT_Y_CENTER) {
           tft.drawLine(x_prev, last_frame_y_i[i-1], x_curr, last_frame_y_i[i], ILI9341_WHITE);
       }
-
-      // 3-3. 새 '라인' 그리기
       tft.drawLine(x_prev, new_y_v[i-1], x_curr, new_y_v[i], ILI9341_BLUE);
       tft.drawLine(x_prev, new_y_i[i-1], x_curr, new_y_i[i], ILI9341_ORANGE);
   }
-  tft.endWrite(); // SPI 트랜잭션 종료
-  // --- 그리기 완료 ---
+  tft.endWrite();
 
-
-  // 3-5. [신규] 다음 프레임을 위해 새 Y값 배열을 (last)Y값 배열로 복사
   for (int i = 0; i < PLOT_WIDTH; i++) {
       last_frame_y_v[i] = new_y_v[i];
       last_frame_y_i[i] = new_y_i[i];
   }
 
-
-  // 4. --- 오토 스케일링 준비 (다음 프레임용) ---
-  // (다음 프레임을 그릴 때 사용할 Y축 스케일을 업데이트)
   V_peak_dynamic = (new_frame_V_peak < 50.0) ? 50.0 : new_frame_V_peak * 1.1;
   I_peak_dynamic = (new_frame_I_peak < 1.0) ? 1.0 : new_frame_I_peak * 1.1;
-  
-  updateYAxisLabels(); // 동적 Y축 라벨 업데이트
+  updateYAxisLabels();
+
+  tft.setTextSize(1);
+  printTFTValue(180, 25, new_frame_V_peak, prev_frame_V_peak, 1, ILI9341_BLUE, " V");
+  if (new_frame_I_peak < 1.0) {
+    printTFTValue(180, 40, new_frame_I_peak * 1000.0, prev_frame_I_peak * 1000.0, 0, ILI9341_ORANGE, " mA");
+  } else {
+    printTFTValue(180, 40, new_frame_I_peak, prev_frame_I_peak, 2, ILI9341_ORANGE, " A");
+  }
+  prev_frame_V_peak = new_frame_V_peak;
+  prev_frame_I_peak = new_frame_I_peak;
 }
 // ==============================================================================
-// 17. [v17 수정] 퍼지 로직 시스템 빌드 함수 (Fuzzy.h 문법 적용)
-// (번호만 16->17로 변경)
+// 17. 퍼지 로직 시스템 빌드 함수
 // ==============================================================================
 void buildFuzzySystem() {
-  // === 입력 1: Total Current (0A ~ 10A) ===
+  // [v20] 참고: 퍼지 로직의 임계값은 아직 실시간 변경을 지원하지 않습니다.
+  // (구현하려면 FuzzySet 객체들을 삭제하고 다시 생성하는 로직이 필요함)
   safeCurrent = new FuzzySet(0, 0, 5, 6); 
   warningCurrent = new FuzzySet(5, 6, 6, 7); 
   dangerCurrent = new FuzzySet(6.5, 7.25, 7.25, 8); 
   criticalCurrent = new FuzzySet(7.5, 8, 10, 10); 
-
   totalCurrent->addFuzzySet(safeCurrent);
   totalCurrent->addFuzzySet(warningCurrent); 
   totalCurrent->addFuzzySet(dangerCurrent);
   totalCurrent->addFuzzySet(criticalCurrent);
   fuzzy->addFuzzyInput(totalCurrent); 
 
-  // === 입력 2: Current Change Rate (dI/dt) (-5A/s ~ +10A/s) ===
   stableChange = new FuzzySet(-2, -1, 1, 2);
-  slowIncrease = new FuzzySet(1, 3, 3, 5);     // Trian(1,3,5) 
+  slowIncrease = new FuzzySet(1, 3, 3, 5);
   suddenSurge = new FuzzySet(4, 6, 10, 10); 
-  
   currentChangeRate->addFuzzySet(stableChange);
   currentChangeRate->addFuzzySet(slowIncrease);
   currentChangeRate->addFuzzySet(suddenSurge);
   fuzzy->addFuzzyInput(currentChangeRate); 
 
-  // === 출력: Shutdown Level (0 ~ 10) ===
-  level0 = new FuzzySet(0, 0, 0, 1);     // Trian(0,0,1) 
-  level3 = new FuzzySet(2, 3, 3, 4);    // Trian(2,3,4) 
-  level6 = new FuzzySet(5, 6, 6, 7);    // Trian(5,6,7) 
-  level10 = new FuzzySet(9, 10, 10, 10); // Trian(9,10,10) or Trap(9,10,10,10) 
-
+  level0 = new FuzzySet(0, 0, 0, 1);
+  level3 = new FuzzySet(2, 3, 3, 4);
+  level6 = new FuzzySet(5, 6, 6, 7);
+  level10 = new FuzzySet(9, 10, 10, 10);
   shutdownLevel->addFuzzySet(level0);
   shutdownLevel->addFuzzySet(level3);
   shutdownLevel->addFuzzySet(level6);
   shutdownLevel->addFuzzySet(level10);
   fuzzy->addFuzzyOutput(shutdownLevel); 
 
-  // === 규칙 (Rules) ===
-
-  // Rule 1: IF (전류가 안전) AND (변화가 안정) THEN (Level 0)
   FuzzyRuleAntecedent* if_Safe_and_Stable = new FuzzyRuleAntecedent();
   if_Safe_and_Stable->joinWithAND(safeCurrent, stableChange); 
   FuzzyRuleConsequent* then_Level0 = new FuzzyRuleConsequent();
   then_Level0->addOutput(level0);
   fuzzy->addFuzzyRule(new FuzzyRule(1, if_Safe_and_Stable, then_Level0)); 
 
-  // Rule 2: IF (전류가 주의) AND (변화가 안정) THEN (Level 3)
   FuzzyRuleAntecedent* if_Warning_and_Stable = new FuzzyRuleAntecedent();
   if_Warning_and_Stable->joinWithAND(warningCurrent, stableChange); 
   FuzzyRuleConsequent* then_Level3 = new FuzzyRuleConsequent();
   then_Level3->addOutput(level3); 
   fuzzy->addFuzzyRule(new FuzzyRule(2, if_Warning_and_Stable, then_Level3)); 
 
-  // Rule 3: IF (전류가 위험) AND (변화가 안정) THEN (Level 6)
   FuzzyRuleAntecedent* if_Danger_and_Stable = new FuzzyRuleAntecedent();
   if_Danger_and_Stable->joinWithAND(dangerCurrent, stableChange); 
   FuzzyRuleConsequent* then_Level6 = new FuzzyRuleConsequent();
   then_Level6->addOutput(level6); 
   fuzzy->addFuzzyRule(new FuzzyRule(3, if_Danger_and_Stable, then_Level6)); 
 
-  // Rule 4: IF (전류가 주의) AND (변화가 서서히 증가) THEN (Level 6)
   FuzzyRuleAntecedent* if_Warning_and_Slow = new FuzzyRuleAntecedent(); 
   if_Warning_and_Slow->joinWithAND(warningCurrent, slowIncrease); 
-  fuzzy->addFuzzyRule(new FuzzyRule(4, if_Warning_and_Slow, then_Level6)); // then_Level6 재사용 
+  fuzzy->addFuzzyRule(new FuzzyRule(4, if_Warning_and_Slow, then_Level6)); 
   
-  // Rule 5: IF (전류가 임계) THEN (Level 10)
   FuzzyRuleAntecedent* if_Critical = new FuzzyRuleAntecedent();
-  if_Critical->joinSingle(criticalCurrent); // [v17 수정] 
+  if_Critical->joinSingle(criticalCurrent);
   FuzzyRuleConsequent* then_Level10 = new FuzzyRuleConsequent();
   then_Level10->addOutput(level10); 
   fuzzy->addFuzzyRule(new FuzzyRule(5, if_Critical, then_Level10)); 
 
-  // Rule 6: IF (변화가 급격) THEN (Level 10)
   FuzzyRuleAntecedent* if_Surge = new FuzzyRuleAntecedent();
-  if_Surge->joinSingle(suddenSurge); // [v17 수정] 
-  fuzzy->addFuzzyRule(new FuzzyRule(6, if_Surge, then_Level10)); // then_Level10 재사용 
+  if_Surge->joinSingle(suddenSurge);
+  fuzzy->addFuzzyRule(new FuzzyRule(6, if_Surge, then_Level10));
 }
 
 
 // ==============================================================================
-// 18. [v17 수정] 퍼지 로직 실행 헬퍼 함수 (포인터 문법 적용)
-// (번호만 17->18로 변경)
+// 18. 퍼지 로직 실행 헬퍼 함수
 // ==============================================================================
 void runFuzzyLogic() {
-  // 1. dI/dt 계산 (I_rms 기준)
   unsigned long currentTime = millis();
-  float deltaTime = (currentTime - lastFuzzyTime) / 1000.0; // 초 단위 
-
-  if (deltaTime < 0.1) { 
-    return; 
-  }
+  float deltaTime = (currentTime - lastFuzzyTime) / 1000.0; 
+  if (deltaTime < 0.1) return; 
 
   float dI_dt = (I_rms - last_I_rms) / deltaTime;
-  
   last_I_rms = I_rms;
   lastFuzzyTime = currentTime; 
 
-  // 2. 퍼지 시스템 실행
-  // 2-1. 입력값 설정 (Fuzzification)
   fuzzy->setInput(1, I_rms); 
   fuzzy->setInput(2, dI_dt); 
-
-  // 2-2. 퍼지 추론 실행
   fuzzy->fuzzify(); 
-
-  // 2-3. 출력값 계산 (Defuzzification)
   float outputLevel = fuzzy->defuzzify(1); 
-
-  // 3. 릴레이 제어
   controlRelays(outputLevel); 
 }
 
 
 // ==============================================================================
-// 19. [v17] 퍼지 출력 -> 릴레이 제어 변환 함수
-// (번호만 18->19로 변경)
+// 19. 퍼지 출력 -> 릴레이 제어 변환 함수
 // ==============================================================================
 void controlRelays(float level) {
-  if (level > 9.0) { // 임계 (Level 10)
-    digitalWrite(RELAY_2_PIN, HIGH); // 부하 2 TRIP 
-    digitalWrite(RELAY_1_PIN, HIGH);      // 부하 1 TRIP 
-    
+  if (level > 9.0) {
+    digitalWrite(RELAY_2_PIN, HIGH);
+    digitalWrite(RELAY_1_PIN, HIGH);
     if (!warningActive) {
       warningMessage = "FUZZY LOGIC TRIP";
       warningActive = true; 
       screenNeedsRedraw = true; 
     }
-    
   } 
-  else if (level > 5.0) { // 위험 (Level 6)
-    digitalWrite(RELAY_2_PIN, HIGH); // 부하 2 TRIP 
-    digitalWrite(RELAY_1_PIN, HIGH);      // 부하 1 TRIP 
+  else if (level > 5.0) {
+    digitalWrite(RELAY_2_PIN, HIGH);
+    digitalWrite(RELAY_1_PIN, HIGH);
   } 
-  else if (level > 2.0) { // 주의 (Level 3)
-    digitalWrite(RELAY_2_PIN, LOW); // 부하 2 ON 
-    digitalWrite(RELAY_1_PIN, HIGH);      // 부하 1 TRIP 
+  else if (level > 2.0) {
+    digitalWrite(RELAY_2_PIN, LOW);
+    digitalWrite(RELAY_1_PIN, HIGH);
   } 
-  else { // 안전 (Level 0)
+  else { 
     if (!warningActive) {
-      digitalWrite(RELAY_2_PIN, LOW); // 부하 2 ON 
-      digitalWrite(RELAY_1_PIN, LOW); // 부하 1 ON 
+      digitalWrite(RELAY_2_PIN, LOW);
+      digitalWrite(RELAY_1_PIN, LOW);
     }
   }
 }
 
 // ==============================================================================
-// 20. [v18] THD 화면 실행 함수 (신규 - 번호 변경)
+// 20. THD 화면 실행 함수
 // ==============================================================================
 void runTHDCalculation() {
-  // 1. 고속 샘플링, FFT, THD 계산 실행
   performFFT_and_CalcTHD(); 
-  
-  // 2. 화면 갱신이 필요하거나 경고가 뜨면 중단
   if (screenNeedsRedraw || warningActive) return; 
-  
-  // 3. 계산된 THD 값을 화면에 표시
   displayTHDScreenValues(); 
 }
 
 // ==============================================================================
-// 21. [v18] THD 화면 정적 UI 그리기 (신규 - 번호 변경)
+// 21. THD 화면 정적 UI 그리기
 // ==============================================================================
 void displayTHDScreenStatic() {
-  tft.setCursor(10, 10);
+  tft.setCursor(65, 10); // [v20]
   tft.setTextColor(ILI9341_BLACK); 
   tft.setTextSize(2);
-  tft.println("HARMONIC DISTORTION (THD)"); 
-  
+  tft.println("HARMONIC DISTORTION"); 
   displayNetworkStatus();
+  drawBackButton(); // [v20]
   
   tft.setTextSize(3);
   tft.setCursor(10, 70); tft.setTextColor(ILI9341_BLUE); tft.println("THD-V:");
   tft.setCursor(10, 150); tft.setTextColor(ILI9341_ORANGE); tft.println("THD-I:");
   
-  tft.setCursor(10, SCREEN_HEIGHT - 12); tft.setTextSize(1);
-  tft.setTextColor(ILI9341_DARKGREY); 
-  tft.print("Tap screen to switch view"); 
-  
-  // 이전 값 초기화
   prev_thd_v = thd_v_value; 
   prev_thd_i = thd_i_value; 
 }
 
 // ==============================================================================
-// 22. [v18] THD 화면 동적 값 업데이트 (신규 - 번호 변경)
+// 22. THD 화면 동적 값 업데이트
 // ==============================================================================
 void displayTHDScreenValues() {
   tft.setTextSize(4);
-  
-  // THD-V (전압)
   printTFTValue(30, 110, thd_v_value * 100.0, prev_thd_v * 100.0, 1, ILI9341_BLUE, " %"); 
-  
-  // THD-I (전류)
   printTFTValue(30, 190, thd_i_value * 100.0, prev_thd_i * 100.0, 1, ILI9341_ORANGE, " %"); 
-
   prev_thd_v = thd_v_value; 
   prev_thd_i = thd_i_value; 
 }
 
 
 // ==============================================================================
-// 23. [v18] CMSIS-DSP FFT 및 THD 계산 헬퍼 함수 (신규 - 번호 변경)
+// 23. CMSIS-DSP FFT 및 THD 계산 헬퍼 함수
 // ==============================================================================
 float32_t calculateTHD(float32_t* mags, int fundamentalBin) {
   float32_t fundamental_power = mags[fundamentalBin] * mags[fundamentalBin];
   float32_t harmonics_power_sum = 0.0; 
+  if (fundamental_power < 1e-10) return 0.0;
 
-  if (fundamental_power == 0) return 0.0; // 0으로 나누기 방지 
-
-  // 2차부터 MAX_HARMONIC 차수까지 고조파의 제곱을 합산
   for (int n = 2; n <= MAX_HARMONIC; n++) {
     int binIndex = fundamentalBin * n;
-    if (binIndex >= (FFT_N / 2)) { 
-      break; // 샘플링 주파수의 절반(나이퀴스트)을 넘어가면 중단 
-    }
+    if (binIndex >= (FFT_N / 2)) break;
     harmonics_power_sum += mags[binIndex] * mags[binIndex]; 
   }
-
-  // THD = Sqrt( (V2^2 + V3^2 + ...) / V1^2 )
   return sqrt(harmonics_power_sum / fundamental_power); 
 }
 
 
 // ==============================================================================
-// 24. [v18] 메인 FFT/THD 연산 함수 (신규 - 번호 변경)
+// 24. 메인 FFT/THD 연산 함수
 // ==============================================================================
 void performFFT_and_CalcTHD() {
   unsigned long startTime = micros(); 
   
-  // --- 1. 고속 샘플링 (V/I 동시) ---
   for (int i = 0; i < FFT_N; i++) {
-    // [중요] v16의 V/I 동시 샘플링 지연 문제가 여기에도 동일하게 존재합니다. 
     v_samples[i] = (float32_t)(analogRead(VOLTAGE_PIN)) - V_ADC_MIDPOINT; 
-    i_samples[i] = (float32_t)(analogRead(CURRENT_PIN)) - I_ADC_MIDPOINT; 
-    
-    // 샘플링 주기 맞추기
+    i_samples[i] = (float32_t)(analogRead(CURRENT_PIN)) - I_ADC_MIDPOINT;
     while(micros() - startTime < (i + 1) * SAMPLING_PERIOD_US); 
   }
   
-  // (샘플링 중 터치 확인 - UI 반응성을 위해)
-  checkTouchInput();
-  if (screenNeedsRedraw || warningActive) return; 
+  // [v20] 터치 확인은 메인 루프로 이동됨
 
-  // --- 2. Hann 윈도우 적용 (스펙트럼 누설 방지) ---
   for (int i = 0; i < FFT_N; i++) {
     float32_t window_factor = 0.5f - 0.5f * arm_cos_f32(2.0f * PI * i / (FFT_N - 1));
     v_samples[i] = v_samples[i] * window_factor; 
     i_samples[i] = i_samples[i] * window_factor; 
   }
   
-  // --- 3. FFT 연산 (전압) ---
   arm_rfft_fast_f32(&fft_inst_v, v_samples, v_fft_output, 0); 
-  
-  // --- 4. FFT 크기 계산 (전압) ---
   arm_cmplx_mag_f32(v_fft_output, v_mags, FFT_N / 2); 
-  
-  // --- 5. FFT 연산 (전류) ---
   arm_rfft_fast_f32(&fft_inst_i, i_samples, i_fft_output, 0); 
-  
-  // --- 6. FFT 크기 계산 (전류) ---
   arm_cmplx_mag_f32(i_fft_output, i_mags, FFT_N / 2); 
-
-  // (연산 중 터치 확인 - UI 반응성을 위해)
-  checkTouchInput();
-  if (screenNeedsRedraw || warningActive) return; 
   
-  // --- 7. THD 계산 ---
+  // [v20] 터치 확인은 메인 루프로 이동됨
+  
   thd_v_value = calculateTHD(v_mags, FUNDAMENTAL_BIN); 
   thd_i_value = calculateTHD(i_mags, FUNDAMENTAL_BIN); 
+  THD_value = thd_v_value * 100.0;
+}
+
+// ==============================================================================
+// 25. [v20] 홈 화면 그리기
+// ==============================================================================
+void displayHomeScreenStatic() {
+  tft.setCursor(50, 10);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.setTextSize(3);
+  tft.print("KW WATT-METER");
   
-  // [v18] 메인 화면용 THD 값(THD_value)도 여기서 갱신
-  THD_value = thd_v_value * 100.0; 
+  displayNetworkStatus();
+
+  // (x, y, w, h, text)
+  drawButton(20, 50, 130, 40, "MAIN POWER");
+  drawButton(170, 50, 130, 40, "PHASOR");
+  drawButton(20, 110, 130, 40, "WAVEFORM");
+  drawButton(170, 110, 130, 40, "THD");
+  drawButton(20, 170, 280, 40, "SETTINGS");
+}
+
+// ==============================================================================
+// 26. [v20] 설정 메인 화면 그리기
+// ==============================================================================
+void displaySettingsScreenStatic() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.setTextSize(2);
+  tft.println("SETTINGS");
+  drawBackButton();
+  
+  drawButton(20, 70, 280, 40, "CALIBRATION");
+  drawButton(20, 130, 280, 40, "PROTECTION");
+}
+
+// ==============================================================================
+// 27. [v20] 설정 - 보정 화면 그리기
+// ==============================================================================
+void displaySettingsCalibStatic() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.setTextSize(2);
+  tft.println("CALIBRATION SETTINGS");
+  drawBackButton();
+
+  // V_CALIB
+  tft.setCursor(10, 70);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.print("V Calib:");
+  drawButton(180, 60, 60, 30, "-");
+  drawButton(240, 60, 60, 30, "+");
+
+  // I_CALIB
+  tft.setCursor(10, 130);
+  tft.print("I Calib:");
+  drawButton(180, 120, 60, 30, "-");
+  drawButton(240, 120, 60, 30, "+");
+  
+  tft.setTextSize(1);
+  tft.setCursor(10, 200);
+  tft.print("NOTE: Values reset on reboot.");
+  tft.setCursor(10, 215);
+  tft.print("CALIB = (Reading / Real) * Old_CALIB");
+}
+
+void runSettingsCalib() {
+  displaySettingsCalibValues();
+}
+
+void displaySettingsCalibValues() {
+  tft.setTextSize(2);
+  // [v20] 헬퍼 함수를 사용하여 값 표시 (정밀도 4)
+  printTFTValue(10, 95, V_CALIB_RMS, prev_V_CALIB_RMS, 4, ILI9341_BLUE, "");
+  printTFTValue(10, 155, I_CALIB_RMS, prev_I_CALIB_RMS, 4, ILI9341_ORANGE, "");
+  
+  prev_V_CALIB_RMS = V_CALIB_RMS;
+  prev_I_CALIB_RMS = I_CALIB_RMS;
+}
+
+// ==============================================================================
+// 28. [v20] 설정 - 보호 화면 그리기
+// ==============================================================================
+void displaySettingsProtectStatic() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.setTextSize(2);
+  tft.println("PROTECTION SETTINGS");
+  drawBackButton();
+
+  // VOLTAGE_THRESHOLD
+  tft.setCursor(10, 70);
+  tft.setTextSize(2);
+  tft.setTextColor(ILI9341_BLACK);
+  tft.print("Over V Thresh:");
+  drawButton(180, 60, 60, 30, "-");
+  drawButton(240, 60, 60, 30, "+");
+
+  tft.setTextSize(1);
+  tft.setCursor(10, 200);
+  tft.print("NOTE: Values reset on reboot.");
+}
+
+void runSettingsProtect() {
+  displaySettingsProtectValues();
+}
+
+void displaySettingsProtectValues() {
+  tft.setTextSize(2);
+  // [v20] 헬퍼 함수를 사용하여 값 표시 (정밀도 1)
+  printTFTValue(10, 95, VOLTAGE_THRESHOLD, prev_VOLTAGE_THRESHOLD, 1, ILI9341_RED, " V");
+  prev_VOLTAGE_THRESHOLD = VOLTAGE_THRESHOLD;
 }
