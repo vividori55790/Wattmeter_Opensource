@@ -1,14 +1,10 @@
 /*
  * ==============================================================================
- * 파일명: 1. Wattmeter_MCU2_Controller.ino (메인 컨트롤러)
- * 버전: v76 (Fix Missing Variables & Compilation Errors)
- * 최종 수정: 2025-11-21
- *
- * [변경 사항 - v76]
- * - 컴파일 에러 해결을 위해 누락된 전역 변수 복구:
- * : setting_steps[], setting_step_index, calib/protect selection 변수들
- * : prev_thd_v, prev_thd_i 등
- * - 기존 v75의 기능(ThingSpeak, Network, Harmonics)은 모두 유지.
+ * 파일명: 1. Wattmeter_MCU2_Controller.ino
+ * 버전: v101 (Direct ADC + Serial1 Comm)
+ * 설명: 
+ * - MCU1과 Serial1(핀 0/1)을 통해 통신합니다.
+ * - 자체 아날로그 핀(A2~A5)을 통해 파형을 직접 샘플링합니다.
  * ==============================================================================
  */
 
@@ -28,7 +24,7 @@ enum ScreenState {
   SCREEN_COMBINED_WAVEFORM, 
   SCREEN_HARMONICS,          
   SCREEN_SETTINGS,
-  SCREEN_SETTINGS_NETWORK,  // 네트워크 설정 화면
+  SCREEN_SETTINGS_NETWORK,  
   SCREEN_SETTINGS_CALIB,    
   SCREEN_SETTINGS_PROTECT,  
   SCREEN_RELAY_CONTROL,     
@@ -43,13 +39,31 @@ volatile ScreenState currentScreen = SCREEN_HOME;
 volatile ScreenState previousScreen = SCREEN_HOME; 
 volatile bool screenNeedsRedraw = true;
 
-// --- 핀 정의 ---
+// --- 핀 정의 (TFT & Touch) ---
 #define TFT_CS     10
 #define TFT_DC     9
 #define TFT_RST    8
 #define TOUCH_CS   7
 
-// ESP-01 핀 정의 (RX, TX) - 하드웨어 연결에 맞게 수정하세요
+// --- 아날로그 센서 핀 정의 (MCU2 직접 연결) ---
+// MCU1과 별개로 파형 출력을 위해 MCU2가 직접 읽습니다.
+#define PIN_ADC_V  A3  // 전압 센서
+#define PIN_ADC_I  A2  // 전류 센서 (메인)
+#define PIN_ADC_I1 A4  // 전류 센서 (부하 1)
+#define PIN_ADC_I2 A5  // 전류 센서 (부하 2)
+
+// ADC 관련 상수
+#define ADC_RESOLUTION_BITS 14        
+#define ADC_MAX_VAL (1 << ADC_RESOLUTION_BITS) 
+#define ADC_MIDPOINT (ADC_MAX_VAL / 2)
+
+// 물리 상수 (캘리브레이션 기본값)
+#define BASE_V_CALIB_RMS 0.1775
+#define BASE_I_CALIB_RMS 0.005
+#define BASE_V_OFFSET_ADJUST 7.1
+#define BASE_I_OFFSET_ADJUST 2.5546
+
+// ESP-01 핀 정의
 #define ESP_RX_PIN 2 
 #define ESP_TX_PIN 3 
 
@@ -91,7 +105,7 @@ float temp_V_MULTIPLIER;
 float temp_I_MULTIPLIER;
 int temp_setting_step_index;
 
-// --- [복구] 설정 UI 관련 변수 (컴파일 에러 해결) ---
+// --- 설정 UI 관련 변수 ---
 float setting_steps[] = {0.0001, 0.01, 0.1, 1.0, 10.0};
 const int NUM_SETTING_STEPS = 5;
 int setting_step_index = DEFAULT_SETTING_STEP_INDEX;
@@ -106,13 +120,13 @@ int prev_protect_selection = -1;
 const int NUM_PROTECT_SETTINGS = 2; 
 
 // --- 네트워크 및 ThingSpeak 변수 ---
-String wifiSSID = "YOUR_WIFI_SSID"; 
-String wifiPASS = "YOUR_WIFI_PASSWORD"; 
-String apiKey = "YOUR_THINGSPEAK_API_KEY"; 
+String wifiSSID = "Mathsaves"; 
+String wifiPASS = "19886382"; 
+String apiKey = "X50GVA1VU213PQ3Z"; 
 
-bool isWifiEnabled = false;     // WiFi 켜짐/꺼짐 설정
-bool isWifiConnected = false;   // 실제 연결 상태
-unsigned long lastSendTime = 0; // 마지막 전송 시간
+bool isWifiEnabled = false;     
+bool isWifiConnected = false;   
+unsigned long lastSendTime = 0; 
 const unsigned long SEND_INTERVAL = 20000; // 20초
 
 // 데이터 전송 선택 플래그
@@ -148,8 +162,9 @@ String warningMessage = "";
 #define TS_RAW_X2 3760
 #define TS_RAW_Y2 3670
 
-#define PLOT_X_START 60 
-#define PLOT_X_END 285 
+// 파형 그래프 위치 조정
+#define PLOT_X_START 30 
+#define PLOT_X_END 315 
 #define PLOT_WIDTH (PLOT_X_END - PLOT_X_START)
 #define PLOT_Y_START 50 
 #define PLOT_Y_END 190 
@@ -172,7 +187,7 @@ float plot2_axis_max = I_AXIS_STEPS[2];
 float plot3_axis_max = I_AXIS_STEPS[2]; 
 
 int waveformPlotType = 0; 
-const char* WAVEFORM_TYPE_LABELS[] = {"V/I", "P/V", "I/I1/I2"};
+const char* WAVEFORM_TYPE_LABELS[] = {"V/I", "P/Q", "I/I1/I2"};
 int waveformTriggerMode = 0; 
 const char* WAVEFORM_MODE_LABELS[] = {"Cont.", "Trig.", "Single"};
 volatile bool isWaveformFrozen = false; 
@@ -200,7 +215,6 @@ float phase_load2_deg = 0.0;
 float thd_v_value = 0.0;
 float32_t thd_i_value = 0.0;
 
-// [복구] THD 이전값 변수
 float prev_thd_v = 0.0;
 float prev_thd_i = 0.0;
 
@@ -229,7 +243,6 @@ int prev_i1_x = PHASOR_CX, prev_i1_y = PHASOR_CY;
 int prev_i2_x = PHASOR_CX, prev_i2_y = PHASOR_CY;
 
 // --- 함수 프로토타입 ---
-// View_Static.ino
 void setTheme();
 void drawWaveformGridAndLabels();
 void updateYAxisLabels();
@@ -249,7 +262,6 @@ void displaySettingsTimerStatic();
 void displayConfirmSaveStatic();
 void displayWarningScreenStatic();
 
-// View_Dynamic.ino
 void displayMainScreenValues();
 void displayPhaseScreenValues();
 void runCombinedWaveformLoop();
@@ -261,14 +273,13 @@ void runRelayControl();
 void runSettingsTheme();
 void displaySettingsTimerValues();
 
-// Comm_Input.ino
 void checkTouchInput();
 void checkSerialInput();
 
 // AT 커맨드 헬퍼 함수
 String sendAT(String command, const int timeout, boolean debug) {
   String response = "";
-  espSerial.print(command); // 명령 전송
+  espSerial.print(command); 
   long int time = millis();
   while ((time + timeout) > millis()) {
     while (espSerial.available()) {
@@ -284,9 +295,9 @@ String sendAT(String command, const int timeout, boolean debug) {
 
 // WiFi 연결 함수
 bool connectWiFi() {
-  sendAT("AT+CWMODE=1\r\n", 1000, true); // Station 모드
+  sendAT("AT+CWMODE=1\r\n", 1000, true); 
   String cmd = "AT+CWJAP=\"" + wifiSSID + "\",\"" + wifiPASS + "\"\r\n";
-  String response = sendAT(cmd, 5000, true); // 연결 시도 (5초 타임아웃)
+  String response = sendAT(cmd, 5000, true); 
   if (response.indexOf("OK") != -1 || response.indexOf("WIFI CONNECTED") != -1) {
     return true;
   }
@@ -295,27 +306,23 @@ bool connectWiFi() {
 
 // ThingSpeak 전송 함수
 void sendToThingSpeak() {
-  // 1. 연결 시작
+  // WiFi 디버깅 메시지는 USB Serial로 출력
+  Serial.println("Sending to ThingSpeak..."); 
   String cmd = "AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",80\r\n";
   sendAT(cmd, 2000, false);
 
-  // 2. GET 요청 URL 생성
   String getStr = "GET /update?api_key=" + apiKey;
   if (send_V) getStr += "&field1=" + String(V_rms);
   if (send_I) getStr += "&field2=" + String(I_rms);
   if (send_P) getStr += "&field3=" + String(P_real);
   getStr += "\r\n\r\n";
 
-  // 3. 데이터 길이 전송
   cmd = "AT+CIPSEND=";
   cmd += String(getStr.length());
   cmd += "\r\n";
   sendAT(cmd, 1000, false);
 
-  // 4. 데이터 전송
   sendAT(getStr, 2000, false);
-  
-  // 5. 연결 종료
   sendAT("AT+CIPCLOSE\r\n", 1000, false);
 }
 
@@ -334,11 +341,19 @@ void initDummyHarmonics() {
 // 1. Setup 함수
 // ==============================================================================
 void setup() {
-  Serial.begin(115200);
-  espSerial.begin(9600); // ESP-01 기본 Baud rate
-  Serial.println("Controller.ino Booting...");
+  Serial.begin(115200);  // USB Serial (디버깅용)
+  Serial1.begin(115200); // [중요] MCU1 통신용 (RX=0, TX=1)
+  espSerial.begin(9600); // ESP-01용
+
+  Serial.println("MCU2 Controller (Direct ADC & Serial1) Booting...");
   
-  // ESP 초기화 (Reset)
+  // ADC 해상도 및 핀 설정
+  analogReadResolution(ADC_RESOLUTION_BITS); 
+  pinMode(PIN_ADC_V, INPUT);
+  pinMode(PIN_ADC_I, INPUT);
+  pinMode(PIN_ADC_I1, INPUT);
+  pinMode(PIN_ADC_I2, INPUT);
+  
   sendAT("AT+RST\r\n", 2000, true);
 
   initDummyHarmonics(); 
@@ -357,17 +372,12 @@ void setup() {
 // 2. Main Loop
 // ==============================================================================
 void loop() {
-  // 1. 터치 입력 확인
   checkTouchInput(); 
-  
-  // 2. 시리얼 입력 확인
-  checkSerialInput();
+  checkSerialInput(); // MCU1 데이터 수신 확인
 
-  // 3. WiFi 연결 관리 및 ThingSpeak 전송
   if (isWifiEnabled) {
     if (isWifiConnected) {
       if (millis() - lastSendTime > SEND_INTERVAL) {
-        Serial.println("Sending to ThingSpeak...");
         sendToThingSpeak();
         lastSendTime = millis();
       }
@@ -376,7 +386,6 @@ void loop() {
     isWifiConnected = false;
   }
   
-  // 4. 화면 그리기 로직
   if (screenNeedsRedraw) { 
     tft.fillScreen(COLOR_BACKGROUND); 
     
@@ -391,7 +400,7 @@ void loop() {
         case SCREEN_COMBINED_WAVEFORM:
           isWaveformFrozen = false; waveformTriggerMode = 0; 
           if (waveformPlotType == 0) { plot1_axis_max = V_AXIS_STEPS[4]; plot2_axis_max = I_AXIS_STEPS[2]; } 
-          else if (waveformPlotType == 1) { plot1_axis_max = P_AXIS_STEPS[3]; plot2_axis_max = V_AXIS_STEPS[4]; } 
+          else if (waveformPlotType == 1) { plot1_axis_max = P_AXIS_STEPS[3]; plot2_axis_max = P_AXIS_STEPS[3]; } 
           else { plot1_axis_max = I_AXIS_STEPS[2]; plot2_axis_max = I_AXIS_STEPS[2]; plot3_axis_max = I_AXIS_STEPS[2]; }
           drawWaveformGridAndLabels(); updateYAxisLabels();      
           for(int i=0; i<PLOT_WIDTH; i++) { last_frame_y_plot1[i] = PLOT_Y_CENTER; last_frame_y_plot2[i] = PLOT_Y_CENTER; last_frame_y_plot3[i] = PLOT_Y_CENTER; }
@@ -415,7 +424,6 @@ void loop() {
     screenNeedsRedraw = false; 
   }
   
-  // 5. 동적 데이터 업데이트
   switch(currentScreen) {
     case SCREEN_MAIN_POWER: displayMainScreenValues(); break;
     case SCREEN_PHASE_DIFFERENCE: displayPhaseScreenValues(); break;

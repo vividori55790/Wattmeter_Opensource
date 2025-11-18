@@ -1,13 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 2. View_Static.ino
- * 버전: v75 (Network UI Added)
+ * 버전: v80 (Phasor Button Fix)
  * 최종 수정: 2025-11-21
  *
- * [변경 사항 - v75]
- * - displayNetworkStatus(): 연결 상태에 따른 동적 색상/텍스트 처리.
- * - displaySettingsScreenStatic(): NETWORK 버튼 추가 및 레이아웃 조정.
- * - displaySettingsNetworkStatic(): 네트워크 설정 화면 신규 생성.
+ * [변경 사항]
+ * 1. displayPhaseScreenStatic(): "HOLD/RUN" 버튼 크기를 80x35 -> 60x25로 축소.
+ * 2. drawWaveformGridAndLabels(): 그래프 그리드 그리기 로직 확인 (상수 변경 자동 반영).
  * ==============================================================================
  */
 
@@ -44,11 +43,11 @@ void setTheme() {
   }
 }
 
-// --- [수정] 네트워크 상태 표시 (동적) ---
+// --- 네트워크 상태 표시 (동적) ---
 void displayNetworkStatus() {
   tft.setTextSize(1);
   if (isWifiConnected) {
-    tft.setTextColor(COLOR_BLUE); // 연결되면 파란색(또는 초록)
+    tft.setTextColor(COLOR_BLUE); 
     tft.setCursor(240, 5); 
     tft.print("NET: ON ");
   } else {
@@ -167,8 +166,9 @@ void displayPhaseScreenStatic() {
   tft.drawFastHLine(280, legendY + 17, 10, COLOR_GREEN); 
   tft.setCursor(295, legendY + 4); tft.print("I-2");
   
+  // [수정] 버튼 크기 축소 (80x35 -> 60x25) 및 위치 조정 (Y: 200 -> 205)
   String btnText = isPhaseFrozen ? "RUN" : "HOLD";
-  drawButton(20, 200, 80, 35, btnText);
+  drawButton(20, 205, 60, 25, btnText);
 }
 
 // --- HARMONICS 화면 ---
@@ -228,23 +228,22 @@ void displayHarmonicsScreenStatic() {
   }
 }
 
-// --- [수정] 설정 메인 화면 ---
+// --- 설정 메인 화면 ---
 void displaySettingsScreenStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
   tft.setTextSize(2);
   tft.println("SETTINGS");
-  displayNetworkStatus(); // 동적 표시 호출
+  displayNetworkStatus(); 
   drawBackButton();
   
-  // 버튼 배치 간격 조정
   drawButton(20, 50, 280, 35, "CALIBRATION");
   drawButton(20, 90, 280, 35, "PROTECTION");
-  drawButton(20, 130, 280, 35, "NETWORK"); // [신규]
+  drawButton(20, 130, 280, 35, "NETWORK"); 
   drawButton(20, 170, 280, 35, "ADVANCED");
 }
 
-// --- [신규] 네트워크 설정 화면 ---
+// --- 네트워크 설정 화면 ---
 void displaySettingsNetworkStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -252,18 +251,13 @@ void displaySettingsNetworkStatic() {
   tft.println("NETWORK SETTINGS");
   drawBackButton();
 
-  // 1. WiFi Toggle Switch (x=60, y=50, w=200, h=50)
-  // 초기 그리기 (상태는 Dynamic에서 처리)
+  // 1. WiFi Toggle Switch
   tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
   
   // 2. Data Selection Header
   tft.setCursor(20, 115);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.print("Data to Send (ThingSpeak):");
-  
-  // 3. Checkboxes (V, I, P)
-  // 위치: V(20,135), I(90,135), P(160,135)
-  // Dynamic에서 그리기 처리
 }
 
 // --- 캘리브레이션 설정 화면 ---
@@ -463,6 +457,7 @@ void drawWaveformGridAndLabels() {
   tft.println("WAVEFORM (60Hz)");
   drawBackButton(); 
   
+  // [수정] PLOT_X_START 등은 Controller.ino에 정의된 상수를 따름 (30으로 변경됨)
   tft.drawRect(PLOT_X_START, PLOT_Y_START, PLOT_WIDTH, (PLOT_Y_END - PLOT_Y_START), COLOR_GRID); 
   tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, COLOR_GRID); 
   tft.drawFastVLine(PLOT_X_START, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), COLOR_TEXT_SECONDARY); 
