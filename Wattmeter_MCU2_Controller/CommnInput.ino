@@ -1,7 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 4. Comm_Input.ino
- * 버전: v70 (Waveform UI Overhaul)
+ * 버전: v75 (Network Controls)
+ * 최종 수정: 2025-11-21
+ *
+ * [변경 사항 - v75]
+ * - SCREEN_SETTINGS_NETWORK 터치 로직 추가.
+ * - WiFi Master Switch, Data Selection Checkboxes 터치 처리.
  * ==============================================================================
  */
 
@@ -34,7 +39,7 @@ void checkSerialInput() {
     return; 
   }
   
-  // 데이터 파싱
+  // 데이터 파싱 및 전역 변수 갱신
   V_rms = rxJsonDoc["V"] | V_rms;
   I_rms = rxJsonDoc["I"] | I_rms;
   I_rms_load1 = rxJsonDoc["I1"] | I_rms_load1;
@@ -85,6 +90,7 @@ void adjustCalibValue(bool increase) {
   txJsonDoc["CMD"] = "SET_CALIB";
 
   float targetValue;
+
   switch (calib_selection) {
     case 0: // V Multiplier
       targetValue = V_MULTIPLIER + (increase ? step_to_apply : -step_to_apply);
@@ -110,6 +116,7 @@ void adjustCalibValue(bool increase) {
       }
       break;
   }
+  
   serializeJson(txJsonDoc, Serial);
   Serial.println();
 }
@@ -121,6 +128,7 @@ void adjustProtectValue(bool increase) {
 
   txJsonDoc.clear();
   float targetValue;
+
   switch (protect_selection) {
     case 0: // Over V Thresh
       targetValue = VOLTAGE_THRESHOLD + (increase ? step_to_apply : -step_to_apply);
@@ -140,6 +148,7 @@ void adjustProtectValue(bool increase) {
       }
       break;
   }
+
   serializeJson(txJsonDoc, Serial);
   Serial.println();
 }
@@ -172,6 +181,10 @@ void checkTouchInput() {
           while(Serial.available()) Serial.read();
           isWaveformFrozen = false; 
         }
+
+        isMainPowerFrozen = false;
+        isPhaseFrozen = false;
+        isHarmonicsFrozen = false;
         
         if (currentScreen == SCREEN_SETTINGS_CALIB || currentScreen == SCREEN_SETTINGS_PROTECT) {
           if (settingsChanged) { 
@@ -184,9 +197,12 @@ void checkTouchInput() {
         else if (currentScreen == SCREEN_SETTINGS_THEME || 
                  currentScreen == SCREEN_SETTINGS_RESET || 
                  currentScreen == SCREEN_SETTINGS_TIMER || 
+                 currentScreen == SCREEN_SETTINGS_NETWORK || // [신규]
                  currentScreen == SCREEN_CONFIRM_SAVE) {
           if (currentScreen == SCREEN_CONFIRM_SAVE) {
              currentScreen = SCREEN_SETTINGS; 
+          } else if (currentScreen == SCREEN_SETTINGS_NETWORK) {
+             currentScreen = SCREEN_SETTINGS;
           } else {
              currentScreen = SCREEN_SETTINGS_ADVANCED;
           }
@@ -207,6 +223,7 @@ void checkTouchInput() {
       }
     }
 
+    // 화면별 터치 로직
     switch (currentScreen) {
       case SCREEN_HOME:
         if (p.x >= 20 && p.x <= 150 && p.y >= 50 && p.y <= 90) {
@@ -223,7 +240,7 @@ void checkTouchInput() {
           sendJsonCommand("{\"CMD\":\"REQ_WAVEFORM\", \"MODE\":1}");
         }
         else if (p.x >= 170 && p.x <= 300 && p.y >= 110 && p.y <= 150) {
-          currentScreen = SCREEN_THD;
+          currentScreen = SCREEN_HARMONICS; 
           screenNeedsRedraw = true;
         }
         else if (p.x >= 20 && p.x <= 150 && p.y >= 170 && p.y <= 210) {
@@ -235,9 +252,42 @@ void checkTouchInput() {
           screenNeedsRedraw = true;
         }
         break;
+      
+      case SCREEN_MAIN_POWER: 
+         if (p.x >= 20 && p.x <= 100 && p.y >= 195 && p.y <= 230) {
+            isMainPowerFrozen = !isMainPowerFrozen;
+            String text = isMainPowerFrozen ? "RUN" : "HOLD";
+            drawButton(20, 195, 80, 35, text);
+            delay(200);
+         }
+         break;
+
+      case SCREEN_PHASE_DIFFERENCE:
+         if (p.x >= 20 && p.x <= 100 && p.y >= 200 && p.y <= 235) {
+            isPhaseFrozen = !isPhaseFrozen;
+            String text = isPhaseFrozen ? "RUN" : "HOLD";
+            drawButton(20, 200, 80, 35, text);
+            delay(200);
+         }
+         break;
+
+      case SCREEN_HARMONICS: 
+        if (p.x >= 10 && p.x <= 100 && p.y >= 200 && p.y <= 235) {
+           harmonicsSource = !harmonicsSource; 
+           screenNeedsRedraw = true; 
+        }
+        else if (p.x >= 110 && p.x <= 210 && p.y >= 200 && p.y <= 235) {
+           isHarmonicsFrozen = !isHarmonicsFrozen;
+        }
+        else if (p.x >= 220 && p.x <= 310 && p.y >= 200 && p.y <= 235) {
+           harmonicsViewMode = !harmonicsViewMode; 
+           screenNeedsRedraw = true; 
+        }
+        break;
 
       case SCREEN_SETTINGS:
-        if (p.x >= 20 && p.x <= 300 && p.y >= 60 && p.y <= 95) { 
+        // 버튼 좌표: 20, 50, 280, 35 -> 50~85 (Calib)
+        if (p.x >= 20 && p.x <= 300 && p.y >= 50 && p.y <= 85) { 
           temp_V_MULTIPLIER = V_MULTIPLIER;
           temp_I_MULTIPLIER = I_MULTIPLIER;
           temp_setting_step_index = setting_step_index;
@@ -245,57 +295,88 @@ void checkTouchInput() {
           currentScreen = SCREEN_SETTINGS_CALIB;
           screenNeedsRedraw = true;
         }
-        else if (p.x >= 20 && p.x <= 300 && p.y >= 105 && p.y <= 140) { 
+        // 20, 90, 280, 35 -> 90~125 (Protect)
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 90 && p.y <= 125) { 
           temp_VOLTAGE_THRESHOLD = VOLTAGE_THRESHOLD;
           temp_setting_step_index = setting_step_index;
           settingsChanged = false; 
           currentScreen = SCREEN_SETTINGS_PROTECT;
           screenNeedsRedraw = true;
         }
-        else if (p.x >= 20 && p.x <= 300 && p.y >= 150 && p.y <= 185) { 
+        // 20, 130, 280, 35 -> 130~165 (Network) [신규]
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 130 && p.y <= 165) { 
+          currentScreen = SCREEN_SETTINGS_NETWORK;
+          screenNeedsRedraw = true;
+        }
+        // 20, 170, 280, 35 -> 170~205 (Advanced)
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 170 && p.y <= 205) { 
           currentScreen = SCREEN_SETTINGS_ADVANCED;
           screenNeedsRedraw = true;
         }
         break;
 
+      case SCREEN_SETTINGS_NETWORK: // [신규] 네트워크 설정 터치
+        // 1. WiFi Toggle Switch (x=60, y=50, w=200, h=50)
+        if (p.x >= 60 && p.x <= 260 && p.y >= 50 && p.y <= 100) {
+          isWifiEnabled = !isWifiEnabled;
+          if (isWifiEnabled) {
+            // 연결 시작
+            // blocking connect for simplicity, or set flag
+            connectWiFi(); 
+          } else {
+            // 연결 해제
+             sendAT("AT+CWQAP\r\n", 1000, true);
+             isWifiConnected = false;
+          }
+          delay(200);
+        }
+        // 2. Data Selection (V: 20~80, I: 90~150, P: 160~220, y=135~175)
+        else if (p.y >= 135 && p.y <= 175) {
+           if (p.x >= 20 && p.x <= 80) send_V = !send_V;
+           else if (p.x >= 90 && p.x <= 150) send_I = !send_I;
+           else if (p.x >= 160 && p.x <= 220) send_P = !send_P;
+        }
+        break;
+
       case SCREEN_SETTINGS_ADVANCED:
-        if (p.x >= 20 && p.x <= 300 && p.y >= 60 && p.y <= 95) { 
+        if (p.x >= 20 && p.x <= 300 && p.y >= 60 && p.y <= 95) { // THEME
           currentScreen = SCREEN_SETTINGS_THEME;
           screenNeedsRedraw = true;
         }
-        else if (p.x >= 20 && p.x <= 300 && p.y >= 105 && p.y <= 140) { 
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 105 && p.y <= 140) { // TIMER
           temp_timer_setting_seconds = timer_setting_seconds; 
           currentScreen = SCREEN_SETTINGS_TIMER;
           screenNeedsRedraw = true;
         }
-        else if (p.x >= 20 && p.x <= 300 && p.y >= 150 && p.y <= 185) { 
+        else if (p.x >= 20 && p.x <= 300 && p.y >= 150 && p.y <= 185) { // RESET
           currentScreen = SCREEN_SETTINGS_RESET;
           screenNeedsRedraw = true;
         }
         break;
 
       case SCREEN_SETTINGS_TIMER:
-        if (p.x >= 20 && p.x <= 80 && p.y >= 100 && p.y <= 140) {
+        if (p.x >= 20 && p.x <= 80 && p.y >= 115 && p.y <= 165) {
           if (temp_timer_setting_seconds >= TIMER_STEP_VALUES[timer_step_index]) {
             temp_timer_setting_seconds -= TIMER_STEP_VALUES[timer_step_index];
           } else {
             temp_timer_setting_seconds = 0;
           }
         }
-        else if (p.x >= 90 && p.x <= 150 && p.y >= 100 && p.y <= 140) {
+        else if (p.x >= 90 && p.x <= 150 && p.y >= 115 && p.y <= 165) {
           timer_step_index = (timer_step_index + 1) % 6; 
         }
-        else if (p.x >= 160 && p.x <= 220 && p.y >= 100 && p.y <= 140) {
+        else if (p.x >= 160 && p.x <= 220 && p.y >= 115 && p.y <= 165) {
           if (temp_timer_setting_seconds + TIMER_STEP_VALUES[timer_step_index] <= 359999) {
             temp_timer_setting_seconds += TIMER_STEP_VALUES[timer_step_index];
           }
         }
-        else if (p.x >= 240 && p.x <= 300 && p.y >= 100 && p.y <= 140) {
-          sendJsonCommand("{\"CMD\":\"SET_TIMER\", \"SEC\":" + String(temp_timer_setting_seconds) + "}");
-        }
-        else if (p.x >= 240 && p.x <= 300 && p.y >= 150 && p.y <= 190) {
-          temp_timer_setting_seconds = 0; 
-          sendJsonCommand("{\"CMD\":\"SET_TIMER\", \"SEC\":0}");
+        else if (p.x >= 230 && p.x <= 310 && p.y >= 115 && p.y <= 165) {
+          if (is_timer_active) {
+             sendJsonCommand("{\"CMD\":\"SET_TIMER\", \"SEC\":0}");
+          } else {
+             sendJsonCommand("{\"CMD\":\"SET_TIMER\", \"SEC\":" + String(temp_timer_setting_seconds) + "}");
+          }
+          delay(200);
         }
         break;
 
@@ -405,7 +486,7 @@ void checkTouchInput() {
         if (p.x >= 10 && p.x <= 110 && p.y >= 195 && p.y <= 230) {
           waveformPlotType = (waveformPlotType + 1) % 3;
           sendJsonCommand("{\"CMD\":\"SET_WAVE_TYPE\", \"TYPE\":" + String(waveformPlotType) + "}");
-          drawButton(10, 195, 100, 35, String(WAVEFORM_TYPE_LABELS[waveformPlotType]));
+          drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
           
           if (waveformPlotType == 0) { 
              plot1_axis_max = V_AXIS_STEPS[4];
@@ -421,34 +502,25 @@ void checkTouchInput() {
           updateYAxisLabels(); 
           screenNeedsRedraw = true; 
         }
-        
-        // 버튼 2: Mode (3단계: Real-time -> Trigger -> Single)
+        // 버튼 2: Mode
         else if (p.x >= 115 && p.x <= 215 && p.y >= 195 && p.y <= 230) {
-          if (isWaveformFrozen) {
+          if (waveformTriggerMode == 2 && isWaveformFrozen) {
              isWaveformFrozen = false;
           } else {
              waveformTriggerMode = (waveformTriggerMode + 1) % 3;
+             isWaveformFrozen = false; 
           }
           
           drawButton(115, 195, 100, 35, String(WAVEFORM_MODE_LABELS[waveformTriggerMode]));
-
-          // Mode 0 (Real-time): SYNC=0 (Free run)
-          // Mode 1 (Trigger) / Mode 2 (Single) : SYNC=1 (Zero Cross)
           int syncVal = (waveformTriggerMode == 0) ? 0 : 1;
           sendJsonCommand("{\"CMD\":\"REQ_WAVEFORM\", \"MODE\":1, \"SYNC\":" + String(syncVal) + "}");
         }
-        
         // 버튼 3: Time
         else if (p.x >= 220 && p.x <= 310 && p.y >= 195 && p.y <= 230) {
           waveformPeriodIndex = (waveformPeriodIndex + 1) % 3;
           sendJsonCommand("{\"CMD\":\"SET_WAVE_PERIOD\", \"IDX\":" + String(waveformPeriodIndex) + "}");
-          drawButton(220, 195, 90, 35, String(WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]));
+          drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
         }
-        break;
-
-      case SCREEN_MAIN_POWER:
-      case SCREEN_PHASE_DIFFERENCE:
-      case SCREEN_THD:
         break;
     }
     delay(100); 
