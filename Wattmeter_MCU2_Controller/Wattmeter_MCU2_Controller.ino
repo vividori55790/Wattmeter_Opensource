@@ -1,13 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v205 (Waveform Dual-Y, Harmonics Log-Abs, Simplified Timer, Non-blocking Network)
+ * 버전: v206 (Timer Logic Internalized, Menu Restructured)
  * 설명: 
- * - [Mod] 파형 안정성 개선 및 Y축 양쪽 표시 (좌:Plot1, 우:Plot2)
- * - [Mod] 고조파: 전압(파랑)/전류(주황) 색상 분리, 로그 스케일 절대값(V/A) 표시
- * - [Mod] 타이머 UI: 타겟 버튼 통합(Toggle), 시간 표시 통합, Step 텍스트 버튼화
- * - [Mod] 네트워크: OFF > WAIT > ON 상태 머신, 백그라운드 연결 시도
- * - [Refactor] MCU 간 통신을 Serial1으로 명확화
+ * - [Mod] 타이머 카운트 로직을 MCU2 내부 millis() 기반으로 변경
+ * - [Mod] 타이머 종료 시 MCU2가 스스로 트립 명령 전송 및 경고 표시
+ * - [Mod] Warning Message for Timer Trip changed to "TIMER END" (Blue bg support)
+ * - 파형, 고조파, 네트워크 등 기존 기능 유지
  * ==============================================================================
  */
 
@@ -152,7 +151,7 @@ String wifiSSID = "Mathsaves";
 String wifiPASS = "19886382"; 
 String apiKey = "X50GVA1VU213PQ3Z"; 
 
-// [Mod] 네트워크 상태 관리 (OFF -> WAIT -> ON)
+// 네트워크 상태 관리 (OFF -> WAIT -> ON)
 enum WifiState { WIFI_OFF, WIFI_WAIT, WIFI_CONNECTED_STATE };
 WifiState wifiState = WIFI_OFF;
 unsigned long lastWifiRetryTime = 0;
@@ -172,7 +171,7 @@ bool is_timer_active = false;
 uint32_t timer_seconds_left = 0;
 uint32_t timer_setting_seconds = 0; 
 uint32_t temp_timer_setting_seconds = 0; 
-// [Mod] 타이머 타겟 릴레이 (1 -> 2 -> 3(Both))
+// 타이머 타겟 릴레이 (1 -> 2 -> 3(Both))
 int timer_target_relay = 1; 
 int prev_timer_target_relay = -1;
 
@@ -184,6 +183,7 @@ const uint32_t TIMER_STEP_VALUES[] = {1, 10, 60, 600, 3600, 36000};
 const char* TIMER_STEP_LABELS[] = {"1s", "10s", "1m", "10m", "1h", "10h"};
 int timer_step_index = 0; 
 int prev_timer_step_index = -1;
+unsigned long last_timer_tick = 0; // [Mod] 내부 타이머 카운트용
 
 float prev_VOLTAGE_THRESHOLD = -1.0;
 float prev_V_MULTIPLIER = -1.0;
@@ -211,15 +211,16 @@ int last_frame_y_plot1[PLOT_WIDTH];
 int last_frame_y_plot2[PLOT_WIDTH]; 
 int last_frame_y_plot3[PLOT_WIDTH]; 
 
-// [Mod] 미리 지정된 범위들 (Stepped Auto-Ranging)
-const int NUM_V_RANGES = 5;
-const float V_RANGES[NUM_V_RANGES] = {50.0, 100.0, 250.0, 350.0, 500.0};
+// [Mod] 미리 지정된 범위들 (Stepped Auto-Ranging Requirements)
+// V: [100, 250, 500], I: [2, 5, 10, 20], P: [200, 500, 1000, 2000]
+const int NUM_V_RANGES = 3;
+const float V_RANGES[NUM_V_RANGES] = {100.0, 250.0, 500.0};
 
-const int NUM_I_RANGES = 5;
-const float I_RANGES[NUM_I_RANGES] = {1.0, 5.0, 10.0, 15.0, 20.0};
+const int NUM_I_RANGES = 4;
+const float I_RANGES[NUM_I_RANGES] = {2.0, 5.0, 10.0, 20.0};
 
-const int NUM_P_RANGES = 6;
-const float P_RANGES[NUM_P_RANGES] = {100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
+const int NUM_P_RANGES = 4;
+const float P_RANGES[NUM_P_RANGES] = {200.0, 500.0, 1000.0, 2000.0};
 
 float plot1_axis_max = V_RANGES[NUM_V_RANGES-1]; 
 float plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; 
@@ -267,7 +268,7 @@ int harmonicsSource = 0;   // 0: Voltage, 1: Current
 int harmonicsViewMode = 0; 
 bool isHarmonicsFrozen = false;
 
-// [Mod] 고조파 버튼 텍스트 상태 변수
+// 고조파 버튼 텍스트 상태 변수
 String harmonicsSrcLabel = "Src: V";
 String harmonicsRunLabel = "RUN";
 String prev_harmonicsSrcLabel = "";
@@ -360,7 +361,7 @@ bool connectWiFi() {
   return false;
 }
 
-// [Mod] 백그라운드 WiFi 처리
+// 백그라운드 WiFi 처리
 void handleNetworkLogic() {
   if (wifiState == WIFI_WAIT) {
     if (millis() - lastWifiRetryTime > WIFI_RETRY_INTERVAL) {
@@ -450,6 +451,40 @@ void loop() {
     }
   }
   
+  // [Mod] MCU2 내부 타이머 로직 (millis 사용)
+  // 타이머 활성화 상태일 때 MCU2가 직접 카운트 다운 및 종료 처리
+  if (is_timer_active) {
+     if (millis() - last_timer_tick >= 1000) {
+        last_timer_tick = millis();
+        if (timer_seconds_left > 0) {
+           timer_seconds_left--;
+        }
+        
+        // 시간이 0이 되면 트립 수행 (MCU2 주도)
+        if (timer_seconds_left == 0) {
+           is_timer_active = false;
+           
+           // 1. 릴레이 차단 명령 전송 (MCU1으로 명령만 전송)
+           if (timer_target_relay == 1 || timer_target_relay == 3) {
+              relay1_state = false;
+              txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 1; txJsonDoc["STATE"] = 0;
+              serializeJson(txJsonDoc, Serial1); Serial1.println();
+           }
+           if (timer_target_relay == 2 || timer_target_relay == 3) {
+              relay2_state = false;
+              txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 2; txJsonDoc["STATE"] = 0;
+              serializeJson(txJsonDoc, Serial1); Serial1.println();
+           }
+           
+           // 2. 화면에 경고(트립) 표시
+           // [Mod] 명확한 메시지로 변경하여 Blue Background Trigger 유도
+           warningMessage = "TIMER END"; 
+           warningActive = true;
+           screenNeedsRedraw = true;
+        }
+     }
+  }
+
   if (screenNeedsRedraw) { 
     tft.fillScreen(COLOR_BACKGROUND); 
     
@@ -463,7 +498,7 @@ void loop() {
         case SCREEN_PHASE_DIFFERENCE: displayPhaseScreenStatic(); break;
         case SCREEN_COMBINED_WAVEFORM:
           isWaveformFrozen = false; waveformTriggerMode = 0; 
-          // [Mod] 초기 범위 설정
+          // 초기 범위 설정
           if (waveformPlotType == 0) { plot1_axis_max = V_RANGES[NUM_V_RANGES-1]; plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; } 
           else if (waveformPlotType == 1) { plot1_axis_max = P_RANGES[NUM_P_RANGES-1]; plot2_axis_max = P_RANGES[NUM_P_RANGES-1]; } 
           else { plot1_axis_max = I_RANGES[NUM_I_RANGES-1]; plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; plot3_axis_max = I_RANGES[NUM_I_RANGES-1]; }
