@@ -1,14 +1,12 @@
 /*
  * ==============================================================================
- * 파일명: 2. View_Static.ino
- * 버전: v206 (Menu Restructure, Text Swaps)
+ * 파일명: 2. Static_View.ino
+ * 버전: v209 (New Grid Layout & Theme Fixes)
  * 설명: 
- * - [Mod] Settings 화면: Calibration 상단 배치, 2x2 그리드 수정
- * - [Mod] Advanced 화면: Timer 제거, 세로형 3버튼 배치
- * - [Mod] SAVE/DISCARD 텍스트 교체 (Left: Save, Right: Discard)
- * - [Mod] THEME 화면 LIGHT/DARK 텍스트 교체
- * - [Mod] Harmonics 화면: Log Scale Grid 적용
- * - [Redesign] WARNING Screen: UI 전면 개편, 동적 배경색, 안전 로직 적용
+ * - [Mod] Settings 화면: Calibration(Top), 2x2 Grid (Protect, Network, Timer, Advanced)
+ * - [Mod] Advanced 화면: 3 Vertical Buttons (Theme, Presets, Reset)
+ * - [Fix] Confirm Save 화면: DISCARD(Left), SAVE(Right)로 배치 수정
+ * - [Fix] Theme 화면: 텍스트와 로직의 일치 (Light=Light, Dark=Dark)
  * ==============================================================================
  */
 
@@ -46,7 +44,6 @@ void setTheme() {
 
 void displayNetworkStatus() {
   tft.setTextSize(1);
-  // 네트워크 상태에 따라 색상 및 텍스트 변경
   if (wifiState == WIFI_CONNECTED_STATE) {
     tft.setTextColor(COLOR_BLUE); 
     tft.setCursor(240, 5); 
@@ -177,35 +174,26 @@ void displayHarmonicsScreenStatic() {
   tft.println("HARMONICS (Log)"); 
   drawBackButton(); 
   
-  // Buttons
   drawButton(10, 200, 90, 35, harmonicsSrcLabel); 
-  // [Mod] Button logic inverted: Measuring -> Show "HOLD", Frozen -> Show "RUN"
   drawButton(110, 200, 100, 35, isHarmonicsFrozen ? "RUN" : "HOLD"); 
   drawButton(220, 200, 90, 35, "View"); 
 
-  // [Mod] Draw Grid based on Source
-  if (harmonicsViewMode == 0) { // Graph Mode
+  if (harmonicsViewMode == 0) {
      int graph_x = 40; int graph_y = 45; int graph_w = 270; int graph_h = 145; 
      tft.drawRect(graph_x, graph_y, graph_w, graph_h, COLOR_GRID);
      
      tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
      
-     // Grid lines for Log Scale (3 Decades)
-     // Top is max (1000V or 10A), Bottom is min (1V or 0.01A)
-     // We have 4 lines: 10^0, 10^1, 10^2, 10^3 (normalized)
-     
      for (int i=0; i<=3; i++) {
-         // i=0 (top, max), i=3 (bottom, min)
          int line_y = graph_y + (i * (graph_h / 3));
          tft.drawFastHLine(graph_x, line_y, graph_w, COLOR_GRID);
          
-         // Draw Labels based on Source
-         if (harmonicsSource == 0) { // Voltage: 1kV, 100V, 10V, 1V
+         if (harmonicsSource == 0) { 
              if(i==0) { tft.setCursor(5, line_y-3); tft.print("1kV"); }
              else if(i==1) { tft.setCursor(5, line_y-3); tft.print("100V"); }
              else if(i==2) { tft.setCursor(5, line_y-3); tft.print("10V"); }
              else if(i==3) { tft.setCursor(5, line_y-3); tft.print("1V"); }
-         } else { // Current: 10A, 1A, 0.1A, 0.01A
+         } else { 
              if(i==0) { tft.setCursor(5, line_y-3); tft.print("10A"); }
              else if(i==1) { tft.setCursor(5, line_y-3); tft.print("1A"); }
              else if(i==2) { tft.setCursor(5, line_y-3); tft.print("0.1A"); }
@@ -213,26 +201,25 @@ void displayHarmonicsScreenStatic() {
          }
      }
      
-     int bar_w = graph_w / 8; // Showing 8 items (Fund + 7 Harmonics)
+     int bar_w = graph_w / 8; 
      for(int i=1; i<=8; i++) { 
         int x_pos = graph_x + (i-1)*bar_w + bar_w/2 - 3; 
         tft.setCursor(x_pos, graph_y + graph_h + 2); 
-        if (i==1) tft.print("F"); // Fundamental
-        else tft.print(2*i - 1); // 3, 5, 7, 9...
+        if (i==1) tft.print("F"); 
+        else tft.print(2*i - 1); 
      }
-  } else { // Text Mode (2 Column Grid)
-     // Draw Header
+  } else { 
      tft.setTextSize(2); tft.setTextColor(COLOR_TEXT_PRIMARY);
      tft.fillRoundRect(10, 50, 145, 30, 5, COLOR_GRID);
      tft.fillRoundRect(165, 50, 145, 30, 5, COLOR_GRID);
      
      tft.setTextColor(ILI9341_BLACK);
-     tft.setCursor(20, 57); tft.print("1st - 7th"); // Ordinals
+     tft.setCursor(20, 57); tft.print("1st - 7th"); 
      tft.setCursor(175, 57); tft.print("9th - 15th");
   }
 }
 
-// [Mod] Settings 화면 레이아웃 변경 (Grid)
+// [Mod] Settings 화면 레이아웃 변경 (Calibration + 2x2 Grid)
 void displaySettingsScreenStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -241,15 +228,15 @@ void displaySettingsScreenStatic() {
   displayNetworkStatus(); 
   drawBackButton();
   
-  // 1. 최상단: Calibration (가로로 긴 버튼)
+  // 1. Top: CALIBRATION (Wide)
   drawButton(20, 50, 280, 40, "CALIBRATION");
   
-  // 2. 그 아래: 2행 2열 그리드
-  // Row 1: Protection / Network
+  // 2. 2x2 Grid
+  // Row 1: Protection (Left) / Network (Right)
   drawButton(20, 110, 130, 40, "PROTECTION");
   drawButton(170, 110, 130, 40, "NETWORK"); 
   
-  // Row 2: Timer / Advanced
+  // Row 2: Timer (Left) / Advanced (Right) -> Timer moved here
   drawButton(20, 170, 130, 40, "TIMER");
   drawButton(170, 170, 130, 40, "ADVANCED");
 }
@@ -363,7 +350,7 @@ void displayRelayControlStatic() {
   prev_r2_state = !relay2_state;
 }
 
-// [Mod] THEME 화면: LIGHT/DARK 텍스트 교체 (상단이 LIGHT, 하단이 DARK)
+// [Mod] THEME 화면: LIGHT/DARK 텍스트 및 로직 매칭 수정
 void displaySettingsThemeStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -371,13 +358,13 @@ void displaySettingsThemeStatic() {
   tft.println("THEME SETTINGS");
   drawBackButton();
   
-  // 텍스트 교체
-  drawButton(20, 70, 280, 40, "LIGHT MODE");
-  drawButton(20, 130, 280, 40, "DARK MODE");
+  // 텍스트 수정: Top=LIGHT, Bot=DARK
+  drawButton(20, 70, 280, 40, "LIGHT THEME");
+  drawButton(20, 130, 280, 40, "DARK THEME");
   
   tft.setTextColor(COLOR_RED);
   tft.setTextSize(2);
-  // 커서 위치 표시 수정 (상단이 Light(false), 하단이 Dark(true))
+  // 현재 상태 표시 (Light=false, Dark=true)
   if (!isDarkMode) { tft.setCursor(5, 80); } else { tft.setCursor(5, 140); }
   tft.print(">");
 }
@@ -393,7 +380,7 @@ void displaySettingsResetStatic() {
   drawButton(170, 100, 130, 40, "CANCEL");
 }
 
-// [Mod] SAVE/DISCARD 텍스트 교체 (Left: Save, Right: Discard)
+// [Mod] SAVE/DISCARD 버튼 위치 수정 (Left: DISCARD, Right: SAVE)
 void displayConfirmSaveStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -402,12 +389,12 @@ void displayConfirmSaveStatic() {
   drawBackButton();
   tft.setCursor(20, 70); tft.print("Save the new settings?");
   
-  // 텍스트 교체
-  drawButton(20, 100, 130, 40, "DISCARD");
-  drawButton(170, 100, 130, 40, "SAVE");
+  // 버튼 배치 수정
+  drawButton(20, 100, 130, 40, "DISCARD"); // Left
+  drawButton(170, 100, 130, 40, "SAVE");    // Right
 }
 
-// [Mod] Advanced 화면: Timer 제거, 세로형 배치
+// [Mod] Advanced 화면: Timer 제거, 세로형 3버튼 배치
 void displaySettingsAdvancedStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -415,7 +402,7 @@ void displaySettingsAdvancedStatic() {
   tft.println("ADVANCED SETTINGS");
   drawBackButton();
   
-  // 세로로 긴 버튼 3개 균형 배치
+  // 세로로 3개 버튼 배치
   drawButton(20, 50, 280, 40, "THEME");
   drawButton(20, 110, 280, 40, "PRESETS");
   drawButton(20, 170, 280, 40, "RESET");
@@ -452,25 +439,19 @@ void displaySettingsTimerStatic() {
   prev_timer_target_relay = -1;
 }
 
-// [Redesign] 경고 화면 UI 전면 개편 (Dynamic Color & No Numbers)
 void displayWarningScreenStatic() {
-  // 1. 트립 원인에 따른 배경색 결정
   uint16_t bgColor;
   if (warningMessage.indexOf("TIMER") != -1) {
-    bgColor = ILI9341_BLUE; // 타이머 트립은 파란색 (정상 종료 알림)
+    bgColor = ILI9341_BLUE; 
   } else {
-    bgColor = ILI9341_RED;  // 과전압, 과전류, Fuzzy 등은 빨간색 (위험 알림)
+    bgColor = ILI9341_RED;  
   }
 
   tft.fillScreen(bgColor);
-  
-  // 테두리 장식 (흰색 라인)
   tft.drawRect(10, 10, SCREEN_WIDTH - 20, SCREEN_HEIGHT - 20, ILI9341_WHITE);
   tft.drawRect(12, 12, SCREEN_WIDTH - 24, SCREEN_HEIGHT - 24, ILI9341_WHITE);
 
   tft.setTextColor(ILI9341_WHITE);
-  
-  // 2. Title: SYSTEM TRIP
   tft.setTextSize(3); 
   int16_t x1, y1;
   uint16_t w1, h1;
@@ -479,21 +460,17 @@ void displayWarningScreenStatic() {
   tft.setCursor((SCREEN_WIDTH - w1) / 2, 40); 
   tft.print(title); 
   
-  // 3. Reason (큰 글씨로 사유 표시)
   tft.setTextSize(3); 
-  // 메시지가 너무 길면 자르거나 조정 가능하지만, 현재 정의된 메시지들은 화면에 맞음
   tft.getTextBounds(warningMessage, 0, 0, &x1, &y1, &w1, &h1);
   tft.setCursor((SCREEN_WIDTH - w1) / 2, 90); 
   tft.print(warningMessage);
   
-  // 4. Relays Status (상태 표시)
   tft.setTextSize(2);
   String relayMsg = "Relays Cut-off";
   tft.getTextBounds(relayMsg, 0, 0, &x1, &y1, &w1, &h1);
   tft.setCursor((SCREEN_WIDTH - w1) / 2, 140);
   tft.print(relayMsg);
   
-  // 5. Instruction (터치 유도 - 안전을 위해 노란색)
   tft.setTextColor(ILI9341_YELLOW);
   tft.setTextSize(2); 
   String resetMsg = "Tap to Check Status >";
@@ -524,4 +501,11 @@ void drawWaveformGridAndLabels() {
   drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
   drawButton(115, 195, 100, 35, WAVEFORM_MODE_LABELS[waveformTriggerMode]); 
   drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
+
+  if (waveformPlotType == 2) {
+     tft.setTextSize(1);
+     tft.setCursor(200, 35); tft.setTextColor(COLOR_BLUE); tft.print("I ");
+     tft.setCursor(220, 35); tft.setTextColor(COLOR_RED); tft.print("I1 ");
+     tft.setCursor(245, 35); tft.setTextColor(COLOR_GREEN); tft.print("I2");
+  }
 }

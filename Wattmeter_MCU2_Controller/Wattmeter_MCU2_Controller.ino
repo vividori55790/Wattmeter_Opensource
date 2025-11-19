@@ -1,11 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v206 (Timer Logic Internalized, Menu Restructured)
+ * 버전: v209 (Timer Logic Moved to MCU2, Menu Restructured)
  * 설명: 
  * - [Mod] 타이머 카운트 로직을 MCU2 내부 millis() 기반으로 변경
  * - [Mod] 타이머 종료 시 MCU2가 스스로 트립 명령 전송 및 경고 표시
- * - [Mod] Warning Message for Timer Trip changed to "TIMER END" (Blue bg support)
+ * - [Mod] Waveform Labels changed (Short/Mid/Long)
  * - 파형, 고조파, 네트워크 등 기존 기능 유지
  * ==============================================================================
  */
@@ -175,7 +175,9 @@ uint32_t temp_timer_setting_seconds = 0;
 int timer_target_relay = 1; 
 int prev_timer_target_relay = -1;
 
-bool prev_is_timer_active = false;
+// [Mod] UI 가시성 제어용 전역 변수 (Dynamic View 참조용)
+bool prev_is_timer_active = false; 
+
 uint32_t prev_timer_seconds_left = 0;
 uint32_t prev_temp_timer_setting_seconds = 0xFFFFFFFF; 
 
@@ -212,13 +214,10 @@ int last_frame_y_plot2[PLOT_WIDTH];
 int last_frame_y_plot3[PLOT_WIDTH]; 
 
 // [Mod] 미리 지정된 범위들 (Stepped Auto-Ranging Requirements)
-// V: [100, 250, 500], I: [2, 5, 10, 20], P: [200, 500, 1000, 2000]
 const int NUM_V_RANGES = 3;
 const float V_RANGES[NUM_V_RANGES] = {100.0, 250.0, 500.0};
-
 const int NUM_I_RANGES = 4;
 const float I_RANGES[NUM_I_RANGES] = {2.0, 5.0, 10.0, 20.0};
-
 const int NUM_P_RANGES = 4;
 const float P_RANGES[NUM_P_RANGES] = {200.0, 500.0, 1000.0, 2000.0};
 
@@ -232,7 +231,7 @@ int waveformTriggerMode = 0;
 const char* WAVEFORM_MODE_LABELS[] = {"Cont.", "Trig.", "Single"};
 volatile bool isWaveformFrozen = false; 
 int waveformPeriodIndex = 1; 
-const char* WAVEFORM_PERIOD_LABELS[] = {"1.0C", "1.5C", "3.0C"};
+const char* WAVEFORM_PERIOD_LABELS[] = {"Short", "Mid", "Long"};
 const int WAVEFORM_DELAYS_US[] = {50, 100, 200}; 
 
 #define PHASOR_CX 235
@@ -477,7 +476,6 @@ void loop() {
            }
            
            // 2. 화면에 경고(트립) 표시
-           // [Mod] 명확한 메시지로 변경하여 Blue Background Trigger 유도
            warningMessage = "TIMER END"; 
            warningActive = true;
            screenNeedsRedraw = true;
@@ -520,7 +518,9 @@ void loop() {
         case SCREEN_SETTINGS_PRESETS: displayPresetScreenStatic(); break; 
         case SCREEN_SETTINGS_TIMER: 
           displaySettingsTimerStatic(); 
-          prev_is_timer_active = !is_timer_active; prev_timer_seconds_left = -1; 
+          // [Mod] 타이머 화면 진입 시 플래그 초기화 (버튼 가시성 보장)
+          prev_is_timer_active = !is_timer_active; 
+          prev_timer_seconds_left = -1; 
           prev_temp_timer_setting_seconds = 0xFFFFFFFF; prev_timer_step_index = -1; 
           prev_timer_target_relay = -1;
           break;
