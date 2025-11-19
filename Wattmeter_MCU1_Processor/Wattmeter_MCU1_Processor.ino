@@ -1,15 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: Wattmeter_MCU1_Processor.ino
- * 버전: v90 (Full Implementation)
- * 최종 수정: 2025-11-21
- *
- * [기능]
+ * 버전: v208 (Timer Logic Removed, Controlled by MCU2)
+ * 설명: 
  * - 전압/전류 센서 RMS, 전력(P,Q,S), 역률, 위상차 계산.
- * - FFT를 통한 THD 계산.
- * - 퍼지 로직을 이용한 위험 감지 및 릴레이 제어 판단.
- * - JSON 통신을 통한 MCU2로 데이터 전송.
- * - [신규] 파형 모드에서 순간 P, Q 계산 및 고속 전송 (P/Q 그래프 지원).
+ * - [Mod] 타이머 로직 제거 (MCU2 컨트롤러가 시간 관리 및 트리거 담당)
+ * - 릴레이 제어 및 파형 스트리밍 기능 유지
  * ==============================================================================
  */
 
@@ -57,16 +53,15 @@ float P_real = 0.0, Q_reactive = 0.0, S_apparent = 0.0, PF = 0.0;
 float phase_main_deg = 0.0, phase_load1_deg = 0.0, phase_load2_deg = 0.0;
 String lead_lag_status = "---";
 float thd_v_value = 0.0, thd_i_value = 0.0;
+String v_harmonics_str = "";
+String i_harmonics_str = "";
+
 bool warningActive = false;
 String warningMessage = "";
 
-// --- 릴레이 및 타이머 ---
+// --- 릴레이 상태 ---
 bool relay1_state = false;
 bool relay2_state = false;
-bool is_timer_active = false;
-uint32_t timer_seconds_left = 0;
-uint32_t timer_setting_seconds = 0; 
-unsigned long lastTimerUpdate = 0;
 
 // --- FFT 객체 및 버퍼 ---
 float32_t v_samples[FFT_N];
@@ -88,15 +83,14 @@ unsigned long lastFuzzyTime = 0;
 
 // --- 파형 스트리밍 제어 ---
 bool isWaveformStreaming = false;
-int waveformType = 0; // 0:V/I, 1:P/Q, 2:I/I1/I2
-int waveformSyncMode = 0; // 0:Free, 1:Sync
-int waveformPeriodIdx = 1;
+int waveformType = 0; 
+int waveformSyncMode = 0; 
+int waveformPeriodIdx = 0; // 0:1.0C, 1:1.5C, 2:3.0C
 unsigned long lastDataSendTime = 0;
-const unsigned long DATA_SEND_INTERVAL = 500; // 500ms마다 메인 데이터 전송
+const unsigned long DATA_SEND_INTERVAL = 500; 
 
-// JSON 문서
 StaticJsonDocument<256> rxJsonDoc;
-StaticJsonDocument<1024> txJsonDoc;
+StaticJsonDocument<1536> txJsonDoc; 
 
 // --- 함수 프로토타입 ---
 void buildFuzzySystem();
@@ -110,9 +104,12 @@ void runWaveformStreaming();
 void waitForVoltageZeroCross();
 float calculatePhase(long time_diff, float period_us);
 float32_t calculateTHD(float32_t* mags, int fundamentalBin);
+String getHarmonicsString(float32_t* mags, int fundamentalBin);
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(115200);  // USB Debugging
+  Serial1.begin(115200); // Inter-MCU Communication
+  
   analogReadResolution(14);
   pinMode(VOLTAGE_PIN, INPUT); 
   pinMode(CURRENT_PIN, INPUT); 
@@ -123,11 +120,9 @@ void setup() {
   digitalWrite(RELAY_1_PIN, LOW); 
   digitalWrite(RELAY_2_PIN, LOW);
 
-  // FFT 초기화
   arm_rfft_fast_init_f32(&fft_inst_v, FFT_N); 
   arm_rfft_fast_init_f32(&fft_inst_i, FFT_N); 
 
-  // 퍼지 시스템 구축
   fuzzy = new Fuzzy();
   totalCurrent = new FuzzyInput(1); 
   currentChangeRate = new FuzzyInput(2); 
@@ -136,28 +131,10 @@ void setup() {
 }
 
 void loop() {
-  // 1. 시리얼 명령 확인 (설정 변경, 모드 전환)
-  checkSerialCommand();
+  checkSerialCommand(); // Reads from Serial1 (MCU2)
 
-  // 2. 타이머 로직
-  if (is_timer_active) {
-    if (millis() - lastTimerUpdate >= 1000) {
-      lastTimerUpdate = millis();
-      if (timer_seconds_left > 0) {
-        timer_seconds_left--;
-      } else {
-        is_timer_active = false;
-        relay1_state = false;
-        relay2_state = false;
-        digitalWrite(RELAY_1_PIN, LOW);
-        digitalWrite(RELAY_2_PIN, LOW);
-        warningMessage = "TIMER FINISHED";
-        warningActive = true;
-      }
-    }
-  }
-
-  // 3. 모드에 따른 동작
+  // [Mod] 타이머 로직 제거됨 (MCU2가 제어)
+  
   if (isWaveformStreaming) {
     runWaveformStreaming();
   } else {
@@ -171,16 +148,15 @@ void loop() {
   }
 }
 
-// --- 시리얼 명령 처리 ---
 void checkSerialCommand() {
-  if (Serial.available() > 0) {
-    String line = Serial.readStringUntil('\n');
+  if (Serial1.available() > 0) {
+    String line = Serial1.readStringUntil('\n');
     DeserializationError error = deserializeJson(rxJsonDoc, line);
     if (!error) {
       String cmd = rxJsonDoc["CMD"];
       
       if (cmd == "REQ_WAVEFORM") {
-         int mode = rxJsonDoc["MODE"]; // 1: Start, 0: Stop
+         int mode = rxJsonDoc["MODE"]; 
          if (mode == 1) {
             isWaveformStreaming = true;
             waveformSyncMode = rxJsonDoc["SYNC"];
@@ -203,29 +179,27 @@ void checkSerialCommand() {
       }
       else if (cmd == "SET_RELAY") {
          int id = rxJsonDoc["ID"];
-         int state = rxJsonDoc["STATE"]; // 2: Toggle
-         if (id == 1) relay1_state = !relay1_state;
-         if (id == 2) relay2_state = !relay2_state;
+         int state = rxJsonDoc["STATE"]; // 0:OFF, 1:ON, 2:TOGGLE
+         
+         if (id == 1) {
+            if(state == 2) relay1_state = !relay1_state;
+            else relay1_state = (state == 1);
+         }
+         if (id == 2) {
+            if(state == 2) relay2_state = !relay2_state;
+            else relay2_state = (state == 1);
+         }
+         
          digitalWrite(RELAY_1_PIN, relay1_state ? HIGH : LOW);
          digitalWrite(RELAY_2_PIN, relay2_state ? HIGH : LOW);
-         sendMainData(); // 상태 즉시 전송
+         sendMainData(); 
       }
-      else if (cmd == "SET_TIMER") {
-         timer_setting_seconds = rxJsonDoc["SEC"];
-         if (timer_setting_seconds > 0) {
-            timer_seconds_left = timer_setting_seconds;
-            is_timer_active = true;
-         } else {
-            is_timer_active = false;
-         }
-         sendMainData();
-      }
+      // [Mod] SET_TIMER 명령 제거됨 (MCU2 내부 처리)
       else if (cmd == "RESET_WARNING") {
          warningActive = false;
-         relay1_state = false;
-         relay2_state = false;
-         digitalWrite(RELAY_1_PIN, LOW);
-         digitalWrite(RELAY_2_PIN, LOW);
+         // 릴레이 상태 복구
+         digitalWrite(RELAY_1_PIN, relay1_state ? HIGH : LOW);
+         digitalWrite(RELAY_2_PIN, relay2_state ? HIGH : LOW);
       }
       else if (cmd == "RESET_SETTINGS") {
          V_MULTIPLIER = 1.0; I_MULTIPLIER = 1.0; VOLTAGE_THRESHOLD = 240.0;
@@ -234,10 +208,7 @@ void checkSerialCommand() {
   }
 }
 
-// --- 파형 스트리밍 (고속 전송) ---
 void runWaveformStreaming() {
-  // 60Hz 1주기 = 16666us. 샘플링 100us -> 약 166 샘플.
-  // 90도 위상 지연(Q 계산용) = 1/4 주기 = 약 41 샘플.
   const int LAG_BUFFER_SIZE = 42; 
   float v_lag_buffer[LAG_BUFFER_SIZE];
   int buffer_head = 0;
@@ -248,17 +219,21 @@ void runWaveformStreaming() {
   }
 
   unsigned long startTime = micros();
-  int sampleCount = 300; // 화면 폭에 맞춤
+  int sampleCount = 300; 
 
   float effective_V_Calib = BASE_V_CALIB_RMS * V_MULTIPLIER;
   float effective_I_Calib = BASE_I_CALIB_RMS * I_MULTIPLIER;
   float effective_V_Offset = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
   float effective_I_Offset = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
 
+  int delay_us = 56; // Default 1.0C
+  if (waveformPeriodIdx == 0) delay_us = 56;       // 1.0 Cycle
+  else if (waveformPeriodIdx == 1) delay_us = 83;  // 1.5 Cycle 
+  else if (waveformPeriodIdx == 2) delay_us = 167; // 3.0 Cycle 
+
   for (int i = 0; i < sampleCount; i++) {
-    // Check Serial for Stop command occasionally
-    if (i % 20 == 0 && Serial.available()) {
-       String s = Serial.readStringUntil('\n');
+    if (i % 20 == 0 && Serial1.available()) {
+       String s = Serial1.readStringUntil('\n');
        if (s.indexOf("MODE\":0") != -1) {
           isWaveformStreaming = false;
           return;
@@ -280,34 +255,32 @@ void runWaveformStreaming() {
     float i1_inst = I1_ac_bits * effective_I_Calib - effective_I_Offset;
     float i2_inst = I2_ac_bits * effective_I_Calib - effective_I_Offset;
 
-    // Q Calculation Logic (90 deg shift)
     v_lag_buffer[buffer_head] = v_inst;
-    float v_lagged = v_lag_buffer[(buffer_head + 1) % LAG_BUFFER_SIZE]; // Oldest value
+    float v_lagged = v_lag_buffer[(buffer_head + 1) % LAG_BUFFER_SIZE];
     buffer_head = (buffer_head + 1) % LAG_BUFFER_SIZE;
     if (buffer_head == 0) buffer_filled = true;
 
-    if (waveformType == 0) { // V, I
-       Serial.print(v_inst); Serial.print(","); Serial.println(i_inst);
+    if (waveformType == 0) { 
+       Serial1.print(v_inst); Serial1.print(","); Serial1.println(i_inst);
     } 
-    else if (waveformType == 1) { // P, Q
+    else if (waveformType == 1) { 
        float p_inst = v_inst * i_inst;
        float q_inst = 0.0;
        if (buffer_filled) {
-          q_inst = v_lagged * i_inst; // Reactive Power approx
+          q_inst = v_lagged * i_inst; 
        }
-       Serial.print(p_inst); Serial.print(","); Serial.println(q_inst);
+       Serial1.print(p_inst); Serial1.print(","); Serial1.println(q_inst);
     } 
-    else { // I, I1, I2
-       Serial.print(i_inst); Serial.print(","); 
-       Serial.print(i1_inst); Serial.print(","); 
-       Serial.println(i2_inst);
+    else { 
+       Serial1.print(i_inst); Serial1.print(","); 
+       Serial1.print(i1_inst); Serial1.print(","); 
+       Serial1.println(i2_inst);
     }
 
-    while(micros() - startTime < (i + 1) * 100); // 100us sampling
+    while(micros() - startTime < (i + 1) * delay_us); 
   }
 }
 
-// --- 메인 데이터 전송 (JSON) ---
 void sendMainData() {
   txJsonDoc.clear();
   txJsonDoc["TYPE"] = "DATA";
@@ -326,26 +299,28 @@ void sendMainData() {
   txJsonDoc["THD_V"] = thd_v_value;
   txJsonDoc["THD_I"] = thd_i_value;
   
-  // Sync Settings
+  txJsonDoc["H_V_STR"] = v_harmonics_str;
+  txJsonDoc["H_I_STR"] = i_harmonics_str;
+  
   txJsonDoc["V_MULT"] = V_MULTIPLIER;
   txJsonDoc["I_MULT"] = I_MULTIPLIER;
   txJsonDoc["V_THR"] = VOLTAGE_THRESHOLD;
   
-  // Relay & Timer
   txJsonDoc["R1"] = relay1_state;
   txJsonDoc["R2"] = relay2_state;
-  txJsonDoc["T_ACTIVE"] = is_timer_active;
-  txJsonDoc["T_LEFT_S"] = timer_seconds_left;
-  txJsonDoc["T_SEC"] = timer_setting_seconds;
+  // [Mod] 타이머 상태는 MCU2가 관리하므로 MCU1은 단순히 0 전송 또는 생략 가능
+  // 호환성을 위해 유지하되 더미 값 전송
+  txJsonDoc["T_ACTIVE"] = false; 
+  txJsonDoc["T_LEFT_S"] = 0;
+  txJsonDoc["T_SEC"] = 0;
 
   txJsonDoc["WARN"] = warningActive;
   if (warningActive) txJsonDoc["MSG"] = warningMessage;
 
-  serializeJson(txJsonDoc, Serial);
-  Serial.println();
+  serializeJson(txJsonDoc, Serial1); 
+  Serial1.println();
 }
 
-// --- 물리량 계산 (RMS, P, Q, S) ---
 void calculatePowerMetrics() {
   unsigned long V_sq_sum = 0; 
   unsigned long I_sq_sum = 0; 
@@ -451,7 +426,6 @@ void calculatePowerMetrics() {
   }
 }
 
-// --- FFT 및 THD 계산 ---
 void performFFT_and_CalcTHD() {
   unsigned long startTime = micros(); 
   for (int i = 0; i < FFT_N; i++) {
@@ -473,9 +447,29 @@ void performFFT_and_CalcTHD() {
   
   thd_v_value = calculateTHD(v_mags, FUNDALMENTAL_BIN); 
   thd_i_value = calculateTHD(i_mags, FUNDALMENTAL_BIN); 
+
+  v_harmonics_str = getHarmonicsString(v_mags, FUNDALMENTAL_BIN);
+  i_harmonics_str = getHarmonicsString(i_mags, FUNDALMENTAL_BIN);
 }
 
-// --- 헬퍼 함수들 ---
+String getHarmonicsString(float32_t* mags, int fundamentalBin) {
+  String s = "";
+  float32_t fund = mags[fundamentalBin];
+  if (fund < 0.001) fund = 1.0; 
+
+  // 기본파(1차) 포함 전송
+  s += "100.0,"; 
+
+  for (int k = 3; k <= 15; k += 2) {
+    int bin = fundamentalBin * k;
+    if (bin >= FFT_N/2) break;
+    float pct = (mags[bin] / fund) * 100.0;
+    s += String(pct, 1);
+    if (k < 15) s += ",";
+  }
+  return s;
+}
+
 float32_t calculateTHD(float32_t* mags, int fundamentalBin) {
   float32_t fundamental_power = mags[fundamentalBin] * mags[fundamentalBin];
   float32_t harmonics_power_sum = 0.0; 
@@ -515,7 +509,6 @@ void waitForVoltageZeroCross() {
   }
 }
 
-// --- 퍼지 로직 ---
 void buildFuzzySystem() {
   FuzzySet* safeCurrent = new FuzzySet(0, 0, 5, 6); 
   FuzzySet* warningCurrent = new FuzzySet(5, 6, 6, 7); 
@@ -545,14 +538,11 @@ void buildFuzzySystem() {
   shutdownLevel->addFuzzySet(level10);
   fuzzy->addFuzzyOutput(shutdownLevel); 
 
-  // Rules
   FuzzyRuleAntecedent* if_Safe_and_Stable = new FuzzyRuleAntecedent();
   if_Safe_and_Stable->joinWithAND(safeCurrent, stableChange); 
   FuzzyRuleConsequent* then_Level0 = new FuzzyRuleConsequent();
   then_Level0->addOutput(level0);
   fuzzy->addFuzzyRule(new FuzzyRule(1, if_Safe_and_Stable, then_Level0)); 
-
-  // (Add other rules as needed similar to original code)
 }
 
 void runFuzzyLogic() {

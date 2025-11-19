@@ -1,16 +1,15 @@
 /*
  * ==============================================================================
  * 파일명: 2. View_Static.ino
- * 버전: v80 (Phasor Button Fix)
- * 최종 수정: 2025-11-21
- *
- * [변경 사항]
- * 1. displayPhaseScreenStatic(): "HOLD/RUN" 버튼 크기를 80x35 -> 60x25로 축소.
- * 2. drawWaveformGridAndLabels(): 그래프 그리드 그리기 로직 확인 (상수 변경 자동 반영).
+ * 버전: v212 (Layout Update)
+ * 설명: 
+ * - [Mod] 트립 화면: 사유 및 릴레이 정보 표시, 버튼 텍스트 변경
+ * - [Mod] Advanced 화면: 긴 버튼 3개 레이아웃 적용
+ * - [Mod] 고조파 화면: 좌측 수치 표시 영역 확보, 하단 그래프 레이아웃
+ * - [Mod] 파형 화면: Wattmeter.ino 스타일(Grid) 복원
  * ==============================================================================
  */
 
-// --- 테마 설정 함수 ---
 void setTheme() {
   if (isDarkMode) {
     COLOR_BACKGROUND = ILI9341_BLACK;
@@ -43,13 +42,16 @@ void setTheme() {
   }
 }
 
-// --- 네트워크 상태 표시 (동적) ---
 void displayNetworkStatus() {
   tft.setTextSize(1);
-  if (isWifiConnected) {
+  if (wifiState == WIFI_CONNECTED_STATE) {
     tft.setTextColor(COLOR_BLUE); 
     tft.setCursor(240, 5); 
     tft.print("NET: ON ");
+  } else if (wifiState == WIFI_WAIT) {
+    tft.setTextColor(COLOR_ORANGE);
+    tft.setCursor(240, 5);
+    tft.print("NET: WAIT");
   } else {
     tft.setTextColor(COLOR_TEXT_SECONDARY);
     tft.setCursor(240, 5); 
@@ -57,7 +59,6 @@ void displayNetworkStatus() {
   }
 }
 
-// --- 뒤로 가기 버튼 그리기 ---
 void drawBackButton() {
   tft.fillRoundRect(5, 5, 50, 30, 8, COLOR_TEXT_SECONDARY); 
   tft.setCursor(20, 12);
@@ -66,7 +67,6 @@ void drawBackButton() {
   tft.print("<");
 }
 
-// --- 공통 버튼 그리기 헬퍼 ---
 void drawButton(int x, int y, int w, int h, String text) {
   tft.fillRoundRect(x, y, w, h, 8, COLOR_BUTTON); 
   tft.drawRoundRect(x, y, w, h, 8, COLOR_BUTTON_OUTLINE); 
@@ -79,7 +79,6 @@ void drawButton(int x, int y, int w, int h, String text) {
   tft.print(text);
 }
 
-// --- 홈 화면 ---
 void displayHomeScreenStatic() {
   tft.setCursor(50, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -94,7 +93,6 @@ void displayHomeScreenStatic() {
   drawButton(170, 170, 130, 40, "RELAY CTRL");
 }
 
-// --- 메인 전력 화면 ---
 void displayMainScreenStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -128,7 +126,6 @@ void displayMainScreenStatic() {
   tft.print("I Mult: x"); tft.print(I_MULTIPLIER, 1);
 }
 
-// --- 위상차 화면 ---
 void displayPhaseScreenStatic() {
   tft.setCursor(65, 10); 
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -166,12 +163,10 @@ void displayPhaseScreenStatic() {
   tft.drawFastHLine(280, legendY + 17, 10, COLOR_GREEN); 
   tft.setCursor(295, legendY + 4); tft.print("I-2");
   
-  // [수정] 버튼 크기 축소 (80x35 -> 60x25) 및 위치 조정 (Y: 200 -> 205)
   String btnText = isPhaseFrozen ? "RUN" : "HOLD";
   drawButton(20, 205, 60, 25, btnText);
 }
 
-// --- HARMONICS 화면 ---
 void displayHarmonicsScreenStatic() {
   tft.setCursor(65, 10); 
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -179,56 +174,33 @@ void displayHarmonicsScreenStatic() {
   tft.println("HARMONICS ANALYSIS"); 
   drawBackButton(); 
   
-  drawButton(10, 200, 90, 35, "Src:V"); 
-  drawButton(110, 200, 100, 35, "RUN"); 
-  drawButton(220, 200, 90, 35, "View"); 
+  // [Mod] 고조파 화면 레이아웃: 좌측 수치(Width 70), 하단/우측 그래프
+  // 그래프 영역 테두리
+  tft.drawRect(80, 45, 230, 145, COLOR_GRID);
+  
+  // 컨트롤 버튼
+  drawButton(10, 200, 90, 35, harmonicsSrcLabel); 
+  drawButton(110, 200, 100, 35, isHarmonicsFrozen ? "RUN" : "HOLD"); 
+  // View 버튼은 제거됨 (항상 그래프+수치)
 
-  if (harmonicsViewMode == 0) { 
-     int graph_x = 40;
-     int graph_y = 45;
-     int graph_w = 270;
-     int graph_h = 145; 
-     
-     tft.drawRect(graph_x, graph_y, graph_w, graph_h, COLOR_GRID);
-     
-     tft.drawFastHLine(graph_x, graph_y, graph_w, COLOR_GRID);
-     tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
-     tft.setCursor(5, graph_y-3); tft.print("100%");
-
-     int y_10 = graph_y + graph_h * 1 / 3;
-     tft.drawFastHLine(graph_x, y_10, graph_w, COLOR_GRID);
-     tft.setCursor(10, y_10-3); tft.print("10%");
-
-     int y_1 = graph_y + graph_h * 2 / 3;
-     tft.drawFastHLine(graph_x, y_1, graph_w, COLOR_GRID);
-     tft.setCursor(15, y_1-3); tft.print("1%");
-
-     tft.setCursor(5, graph_y + graph_h - 3); tft.print("0.1%");
-
-     int bar_w = graph_w / 15;
-     for(int i=1; i<=15; i+=2) { 
-        int x_pos = graph_x + (i-1)*bar_w + bar_w/2 - 3;
-        tft.setCursor(x_pos, graph_y + graph_h + 2);
-        tft.print(i);
-     }
-
-  } else { 
-     tft.setTextSize(2);
-     tft.setTextColor(COLOR_TEXT_PRIMARY);
-     tft.setCursor(10, 50); tft.print("Ord");
-     tft.setCursor(60, 50); tft.print("%");
-     tft.setCursor(120, 50); tft.print("Val");
-     
-     tft.setCursor(170, 50); tft.print("Ord");
-     tft.setCursor(220, 50); tft.print("%");
-     tft.setCursor(280, 50); tft.print("Val");
-     
-     tft.drawFastHLine(10, 70, 300, COLOR_GRID);
-     tft.drawFastVLine(160, 50, 140, COLOR_GRID); 
+  tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
+  // 그래프 X축 레이블 (1, 3, 5 ... 15)
+  int graph_x = 80; int graph_w = 230; int graph_y = 45; int graph_h = 145;
+  int bar_w = graph_w / 15;
+  for(int i=1; i<=15; i+=2) { 
+      int x_pos = graph_x + (i-1)*bar_w + bar_w/2 - 3; 
+      tft.setCursor(x_pos, graph_y + graph_h + 2); tft.print(i);
   }
+  
+  // [Mod] 좌측 수치 레이블 (Title)
+  tft.setTextSize(2); tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setCursor(10, 50); tft.println("THD");
+  tft.setCursor(10, 100); tft.println("Fund");
+  tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
+  tft.setCursor(10, 75); tft.print("(%)");
+  tft.setCursor(10, 125); tft.print("(RMS)");
 }
 
-// --- 설정 메인 화면 ---
 void displaySettingsScreenStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -237,35 +209,73 @@ void displaySettingsScreenStatic() {
   displayNetworkStatus(); 
   drawBackButton();
   
-  drawButton(20, 50, 280, 35, "CALIBRATION");
-  drawButton(20, 90, 280, 35, "PROTECTION");
-  drawButton(20, 130, 280, 35, "NETWORK"); 
-  drawButton(20, 170, 280, 35, "ADVANCED");
+  drawButton(20, 50, 280, 40, "CALIBRATION");
+  drawButton(20, 100, 130, 40, "PROTECTION");
+  drawButton(170, 100, 130, 40, "NETWORK"); 
+  drawButton(20, 150, 130, 40, "TIMER"); 
+  drawButton(170, 150, 130, 40, "ADVANCED");
 }
 
-// --- 네트워크 설정 화면 ---
 void displaySettingsNetworkStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.setTextSize(2);
   tft.println("NETWORK SETTINGS");
   drawBackButton();
-
-  // 1. WiFi Toggle Switch
   tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
-  
-  // 2. Data Selection Header
   tft.setCursor(20, 115);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.print("Data to Send (ThingSpeak):");
 }
 
-// --- 캘리브레이션 설정 화면 ---
-void displaySettingsCalibStatic() {
+void displaySettingsCalibMenuStatic() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(COLOR_TEXT_PRIMARY); tft.setTextSize(2);
+  tft.println("CALIBRATION MODE");
+  drawBackButton();
+
+  drawButton(20, 60, 280, 40, "MULTIPLIER (MANUAL)");
+  drawButton(20, 120, 280, 40, "AUTO CALIBRATION");
+}
+
+void displayAutoCalibStatic() {
+  tft.setCursor(65, 10); tft.setTextColor(COLOR_TEXT_PRIMARY); tft.setTextSize(2);
+  tft.println("AUTO CALIBRATION");
+  drawBackButton();
+
+  switch(auto_calib_step) {
+    case 0:
+      tft.setCursor(20, 60); tft.print("Disconnect ALL power"); tft.setCursor(20, 80); tft.print("and loads.");
+      drawButton(80, 120, 160, 40, "START");
+      break;
+    case 1:
+      tft.setCursor(20, 80); tft.print("Measuring Offsets...");
+      break;
+    case 2:
+      tft.setCursor(20, 60); tft.print("Offsets Measured."); tft.setCursor(20, 80); tft.print("Connect known Load.");
+      drawButton(80, 130, 160, 40, "NEXT");
+      break;
+    case 3:
+      tft.setCursor(30, 50); tft.print("True V:"); tft.setCursor(30, 85); tft.print("True I:"); tft.setCursor(30, 120); tft.print("Step:");
+      drawButton(20, 180, 60, 40, "UP"); drawButton(90, 180, 60, 40, "DOWN"); drawButton(180, 180, 60, 40, "-"); drawButton(250, 180, 60, 40, "+");
+      tft.fillRoundRect(260, 5, 55, 30, 8, COLOR_GREEN); tft.setCursor(270, 12); tft.setTextColor(COLOR_BACKGROUND); tft.print("SAVE");
+      break;
+    case 4:
+      tft.setCursor(20, 80); tft.print("Calculated."); tft.setCursor(20, 100); tft.print("Disconnect to Verify.");
+      drawButton(80, 130, 160, 40, "VERIFY");
+      break;
+    case 5:
+      tft.setCursor(20, 50); tft.print("Verification:"); tft.setCursor(20, 80); tft.print("V:"); tft.setCursor(20, 110); tft.print("I:");
+      drawButton(20, 180, 180, 40, "APPLY & SAVE"); drawButton(210, 180, 100, 40, "RESTART");
+      break;
+  }
+}
+
+void displaySettingsCalibManualStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
   tft.setTextSize(2);
-  tft.println("CALIBRATION SETTINGS");
+  tft.println("MANUAL CALIBRATION");
   drawBackButton();
 
   tft.setTextSize(2);
@@ -284,7 +294,6 @@ void displaySettingsCalibStatic() {
   prev_setting_step_index = -1;
 }
 
-// --- 보호 설정 화면 ---
 void displaySettingsProtectStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -306,7 +315,6 @@ void displaySettingsProtectStatic() {
   prev_setting_step_index = -1;
 }
 
-// --- 릴레이 제어 화면 ---
 void displayRelayControlStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -317,7 +325,6 @@ void displayRelayControlStatic() {
   prev_r2_state = !relay2_state;
 }
 
-// --- 테마 설정 화면 ---
 void displaySettingsThemeStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -328,55 +335,62 @@ void displaySettingsThemeStatic() {
   drawButton(20, 130, 280, 40, "DARK MODE");
   tft.setTextColor(COLOR_RED);
   tft.setTextSize(2);
-  if (isDarkMode) {
-    tft.setCursor(5, 140);
-  } else {
-    tft.setCursor(5, 80);
-  }
+  if (isDarkMode) { tft.setCursor(5, 140); } else { tft.setCursor(5, 80); }
   tft.print(">");
 }
 
-// --- 설정 초기화 화면 ---
 void displaySettingsResetStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.setTextSize(2);
   tft.println("RESET SETTINGS");
   drawBackButton();
-  tft.setCursor(20, 60);
-  tft.print("Reset all values to");
-  tft.setCursor(20, 80);
-  tft.print("factory defaults?");
+  tft.setCursor(20, 60); tft.print("Reset all values to"); tft.setCursor(20, 80); tft.print("factory defaults?");
   drawButton(20, 100, 130, 40, "RESET");
   drawButton(170, 100, 130, 40, "CANCEL");
 }
 
-// --- 저장 확인 화면 ---
 void displayConfirmSaveStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.setTextSize(2);
   tft.println("SAVE CHANGES?");
   drawBackButton();
-  tft.setCursor(20, 70);
-  tft.print("Save the new settings?");
+  tft.setCursor(20, 70); tft.print("Save the new settings?");
+  
   drawButton(20, 100, 130, 40, "SAVE");
   drawButton(170, 100, 130, 40, "DISCARD");
 }
 
-// --- 고급 설정 화면 ---
 void displaySettingsAdvancedStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.setTextSize(2);
   tft.println("ADVANCED SETTINGS");
   drawBackButton();
-  drawButton(20, 60, 280, 35, "THEME");
-  drawButton(20, 105, 280, 35, "TIMER");
-  drawButton(20, 150, 280, 35, "RESET");
+  
+  // [Mod] 3 Long Buttons Layout
+  drawButton(20, 50, 280, 40, "THEME");
+  drawButton(20, 100, 280, 40, "PRESETS"); 
+  drawButton(20, 150, 280, 40, "RESET");
 }
 
-// --- 타이머 설정 화면 ---
+void displayPresetScreenStatic() {
+  tft.setCursor(65, 10); tft.setTextColor(COLOR_TEXT_PRIMARY); tft.setTextSize(2); tft.println("PRESETS (EEPROM)");
+  drawBackButton();
+  
+  String modeStr = isPresetSaveMode ? "MODE: SAVE" : "MODE: LOAD";
+  drawButton(80, 50, 160, 40, modeStr);
+  
+  drawButton(20, 110, 130, 40, "SLOT 1");
+  drawButton(170, 110, 130, 40, "SLOT 2");
+  drawButton(20, 170, 130, 40, "SLOT 3");
+  drawButton(170, 170, 130, 40, "SLOT 4");
+  
+  tft.setTextColor(COLOR_TEXT_SECONDARY); tft.setTextSize(1);
+  tft.setCursor(20, 220); tft.print("Tap Slot to Load/Save");
+}
+
 void displaySettingsTimerStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -384,93 +398,76 @@ void displaySettingsTimerStatic() {
   tft.println("RELAY TIMER SETTINGS");
   drawBackButton();
   
-  tft.setTextSize(2);
-  tft.setCursor(20, 45); tft.print("Set Duration:");
-  
-  drawButton(20, 115, 60, 50, "-");    
-  drawButton(90, 115, 60, 50, "STEP"); 
-  drawButton(160, 115, 60, 50, "+");   
+  drawButton(20, 150, 60, 40, "-");    
+  drawButton(160, 150, 60, 40, "+");   
   
   String actionLabel = is_timer_active ? "STOP" : "START";
-  drawButton(230, 115, 80, 50, actionLabel); 
+  uint16_t color = is_timer_active ? COLOR_RED : COLOR_GREEN;
   
+  tft.fillRoundRect(230, 150, 80, 40, 8, color);
+  tft.drawRoundRect(230, 150, 80, 40, 8, COLOR_BUTTON_OUTLINE);
+  tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(2);
-  tft.setCursor(20, 185); tft.print("Step:");
-  
-  tft.setCursor(20, 215); tft.print("Status:");
-  tft.setCursor(160, 215); tft.print("Left:");
+  tft.setCursor(240, 162); 
+  tft.print(actionLabel);
   
   prev_temp_timer_setting_seconds = 0xFFFFFFFF;
   prev_timer_step_index = -1;
+  prev_timer_target_relay = -1;
 }
 
-// --- 경고 화면 ---
 void displayWarningScreenStatic() {
+  // [Mod] 경고 화면 상세 정보 표시
   tft.fillScreen(ILI9341_RED);
   tft.drawRect(5, 5, SCREEN_WIDTH - 10, SCREEN_HEIGHT - 10, ILI9341_WHITE);
   tft.drawRect(6, 6, SCREEN_WIDTH - 12, SCREEN_HEIGHT - 12, ILI9341_WHITE);
 
   tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(3); 
-  tft.setCursor(75, 40); 
-  tft.print("WARNING!"); 
+  tft.setCursor(75, 30); 
+  tft.print("TRIP/WARN"); 
   
-  tft.setTextColor(ILI9341_WHITE);
   tft.setTextSize(2); 
+  tft.setCursor(20, 80);
+  tft.print("Reason: "); tft.println(tripReason);
   
-  int16_t x1, y1;
-  uint16_t w1, h1;
-  tft.getTextBounds(warningMessage, 0, 0, &x1, &y1, &w1, &h1);
-  tft.setCursor((SCREEN_WIDTH - w1) / 2, 85); 
-  tft.print(warningMessage);
-  
-  if (warningMessage.startsWith("TIMER")) {
-    // 값 표시 안 함
-  } else {
-    tft.setTextSize(3); 
-    char buffer[20];
-    if (warningMessage.startsWith("OVER VOLTAGE")) {
-      dtostrf(V_rms, 4, 1, buffer);
-      strcat(buffer, " V");
-    } else {
-      dtostrf(I_rms, 4, 2, buffer);
-      strcat(buffer, " A");
-    }
-    tft.getTextBounds(buffer, 0, 0, &x1, &y1, &w1, &h1);
-    tft.setCursor((SCREEN_WIDTH - w1) / 2, 125); 
-    tft.print(buffer);
-  }
-  
+  tft.setCursor(20, 110);
+  tft.print("Relay: "); tft.println(trippedRelayInfo);
+
   tft.setTextColor(ILI9341_YELLOW);
   tft.setTextSize(2); 
-  String resetMsg = "Tap screen to reset";
+  
+  // [Mod] Dismiss 안내
+  String resetMsg = "Tap to DISMISS";
+  int16_t x1, y1; uint16_t w1, h1;
   tft.getTextBounds(resetMsg, 0, 0, &x1, &y1, &w1, &h1);
   tft.setCursor((SCREEN_WIDTH - w1) / 2, 190); 
   tft.print(resetMsg); 
 }
 
-// --- 파형 화면 (그리드 및 라벨, 버튼) ---
 void drawWaveformGridAndLabels() {
   tft.setCursor(65, 10); 
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
   tft.setTextSize(2);
-  tft.println("WAVEFORM (60Hz)");
+  tft.println("WAVEFORM (Trigger)");
   drawBackButton(); 
   
-  // [수정] PLOT_X_START 등은 Controller.ino에 정의된 상수를 따름 (30으로 변경됨)
+  // [Mod] Wattmeter.ino 스타일 복원 (단순 그리드 및 0점 표시)
   tft.drawRect(PLOT_X_START, PLOT_Y_START, PLOT_WIDTH, (PLOT_Y_END - PLOT_Y_START), COLOR_GRID); 
   tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, COLOR_GRID); 
   tft.drawFastVLine(PLOT_X_START, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), COLOR_TEXT_SECONDARY); 
   tft.drawFastVLine(PLOT_X_END, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), COLOR_TEXT_SECONDARY); 
 
   tft.setTextSize(1);
-  tft.setTextColor(COLOR_TEXT_SECONDARY);
-  tft.setCursor(PLOT_X_END + 5, PLOT_Y_CENTER - 4); 
-  tft.print("0"); 
+  tft.setTextColor(COLOR_ORANGE);
   tft.setCursor(0, PLOT_Y_CENTER - 4); 
-  tft.print("0"); 
-  
-  drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
-  drawButton(115, 195, 100, 35, WAVEFORM_MODE_LABELS[waveformTriggerMode]); 
-  drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
+  tft.print("0A"); 
+  tft.setTextColor(COLOR_BLUE);
+  tft.setCursor(PLOT_X_END + 5, PLOT_Y_CENTER - 4); 
+  tft.print("0V"); 
+
+  tft.setCursor(10, SCREEN_HEIGHT - 12);
+  tft.setTextSize(1);
+  tft.setTextColor(COLOR_TEXT_SECONDARY);
+  tft.print("Sampling: MCU2 Direct");
 }
