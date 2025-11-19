@@ -1,10 +1,10 @@
 /*
  * ==============================================================================
  * 파일명: 2. Static_View.ino
- * 버전: v209 (New Grid Layout & Theme Fixes)
+ * 버전: v211 (Harmonics UI Layout Optimized)
  * 설명: 
+ * - [Mod] Harmonics Graph: Height reduced (145->135), Centered Vertically (Y: 45->48)
  * - [Mod] Settings 화면: Calibration(Top), 2x2 Grid (Protect, Network, Timer, Advanced)
- * - [Mod] Advanced 화면: 3 Vertical Buttons (Theme, Presets, Reset)
  * - [Fix] Confirm Save 화면: DISCARD(Left), SAVE(Right)로 배치 수정
  * - [Fix] Theme 화면: 텍스트와 로직의 일치 (Light=Light, Dark=Dark)
  * ==============================================================================
@@ -167,6 +167,7 @@ void displayPhaseScreenStatic() {
   drawButton(20, 205, 60, 25, btnText);
 }
 
+// [Mod] Harmonics UI Layout Optimized
 void displayHarmonicsScreenStatic() {
   tft.setCursor(65, 10); 
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -179,11 +180,16 @@ void displayHarmonicsScreenStatic() {
   drawButton(220, 200, 90, 35, "View"); 
 
   if (harmonicsViewMode == 0) {
-     int graph_x = 40; int graph_y = 45; int graph_w = 270; int graph_h = 145; 
+     // [Mod] Graph Layout adjusted
+     // graph_y: 45 -> 48 (Center vertically)
+     // graph_h: 145 -> 135 (Reduced height by 10px for spacing)
+     int graph_x = 40; int graph_y = 48; int graph_w = 270; int graph_h = 135; 
+     
      tft.drawRect(graph_x, graph_y, graph_w, graph_h, COLOR_GRID);
      
      tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
      
+     // Draw Grid Lines (3 divisions)
      for (int i=0; i<=3; i++) {
          int line_y = graph_y + (i * (graph_h / 3));
          tft.drawFastHLine(graph_x, line_y, graph_w, COLOR_GRID);
@@ -219,7 +225,6 @@ void displayHarmonicsScreenStatic() {
   }
 }
 
-// [Mod] Settings 화면 레이아웃 변경 (Calibration + 2x2 Grid)
 void displaySettingsScreenStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -228,15 +233,9 @@ void displaySettingsScreenStatic() {
   displayNetworkStatus(); 
   drawBackButton();
   
-  // 1. Top: CALIBRATION (Wide)
   drawButton(20, 50, 280, 40, "CALIBRATION");
-  
-  // 2. 2x2 Grid
-  // Row 1: Protection (Left) / Network (Right)
   drawButton(20, 110, 130, 40, "PROTECTION");
   drawButton(170, 110, 130, 40, "NETWORK"); 
-  
-  // Row 2: Timer (Left) / Advanced (Right) -> Timer moved here
   drawButton(20, 170, 130, 40, "TIMER");
   drawButton(170, 170, 130, 40, "ADVANCED");
 }
@@ -350,7 +349,6 @@ void displayRelayControlStatic() {
   prev_r2_state = !relay2_state;
 }
 
-// [Mod] THEME 화면: LIGHT/DARK 텍스트 및 로직 매칭 수정
 void displaySettingsThemeStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -358,13 +356,11 @@ void displaySettingsThemeStatic() {
   tft.println("THEME SETTINGS");
   drawBackButton();
   
-  // 텍스트 수정: Top=LIGHT, Bot=DARK
   drawButton(20, 70, 280, 40, "LIGHT THEME");
   drawButton(20, 130, 280, 40, "DARK THEME");
   
   tft.setTextColor(COLOR_RED);
   tft.setTextSize(2);
-  // 현재 상태 표시 (Light=false, Dark=true)
   if (!isDarkMode) { tft.setCursor(5, 80); } else { tft.setCursor(5, 140); }
   tft.print(">");
 }
@@ -380,7 +376,6 @@ void displaySettingsResetStatic() {
   drawButton(170, 100, 130, 40, "CANCEL");
 }
 
-// [Mod] SAVE/DISCARD 버튼 위치 수정 (Left: DISCARD, Right: SAVE)
 void displayConfirmSaveStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -389,12 +384,10 @@ void displayConfirmSaveStatic() {
   drawBackButton();
   tft.setCursor(20, 70); tft.print("Save the new settings?");
   
-  // 버튼 배치 수정
-  drawButton(20, 100, 130, 40, "DISCARD"); // Left
-  drawButton(170, 100, 130, 40, "SAVE");    // Right
+  drawButton(20, 100, 130, 40, "DISCARD"); 
+  drawButton(170, 100, 130, 40, "SAVE");    
 }
 
-// [Mod] Advanced 화면: Timer 제거, 세로형 3버튼 배치
 void displaySettingsAdvancedStatic() {
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
@@ -402,7 +395,6 @@ void displaySettingsAdvancedStatic() {
   tft.println("ADVANCED SETTINGS");
   drawBackButton();
   
-  // 세로로 3개 버튼 배치
   drawButton(20, 50, 280, 40, "THEME");
   drawButton(20, 110, 280, 40, "PRESETS");
   drawButton(20, 170, 280, 40, "RESET");

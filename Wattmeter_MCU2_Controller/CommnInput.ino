@@ -1,14 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: 4. Comm_Input.ino
- * 버전: v105 (Grid Touch, Timer Target, Expanded Touch, Harmonics Toggle)
+ * 버전: v106 (Timer Relay Cycle Logic)
  * 설명: 
- * - 설정 화면 2열 그리드에 맞는 터치 좌표 수정
+ * - [Mod] Timer Target Select: Cycle 1 -> 2 -> Both(3) -> 1 on single button touch
  * - 터치 영역 확대 (+/- 10px padding 적용)
- * - 고조파 화면 버튼 토글 로직 (소스 변경, RUN/HOLD)
- * - 타이머 타겟 릴레이 설정 및 리셋 로직 구현
- * - [Mod] Relay Control One-shot logic applied
- * - [Mod] Warning Screen Safe Release Logic (Go to Relay Ctrl)
+ * - 고조파 화면 버튼 토글 로직 유지
  * ==============================================================================
  */
 
@@ -240,15 +237,9 @@ void checkTouchInput() {
   // [Mod] Warning Screen 해제 로직 변경 (Safe Release)
   if (currentScreen == SCREEN_WARNING) { 
     // 1. 경고 상태만 해제 (릴레이 자동 ON 금지)
-    // sendJsonCommand("{\"CMD\":\"RESET_WARNING\"}"); // <-- 삭제됨 (안전 위험)
     warningActive = false;
     
-    // 2. MCU1에게도 경고 플래그만 끄라고 알림 (릴레이 복구 X)
-    // RESET_WARNING 대신 단순 상태 동기화가 필요하다면 보내지만, 
-    // 현재 MCU1 코드는 RESET_WARNING 시 릴레이 복구 로직이 있을 수 있으므로
-    // MCU2에서만 화면 이동 처리하고, 사용자가 Relay Control에서 켤 때 명령을 보내는 것이 안전함.
-    
-    // 3. 사용자가 직접 확인하도록 Relay Control 화면으로 이동
+    // 2. 사용자가 직접 확인하도록 Relay Control 화면으로 이동
     currentScreen = SCREEN_RELAY_CONTROL;
     screenNeedsRedraw = true; 
     delay(200); // Debounce
@@ -444,9 +435,14 @@ void checkTouchInput() {
       break;
 
     case SCREEN_SETTINGS_TIMER:
-      // 릴레이 선택 (Target 설정)
-      if (p.x >= 15 && p.x <= 145 && p.y >= 40 && p.y <= 90) { timer_target_relay = 1; delay(100); }
-      else if (p.x >= 155 && p.x <= 285 && p.y >= 40 && p.y <= 90) { timer_target_relay = 2; delay(100); }
+      // [Mod] 릴레이 선택 (Target 설정) - Cycle Logic
+      // 버튼 위치: 60, 45, 200, 40 (Dynamic View)
+      // 터치 영역 통합: x:60~260, y:40~90
+      if (p.x >= 60 && p.x <= 260 && p.y >= 40 && p.y <= 90) { 
+         timer_target_relay++;
+         if (timer_target_relay > 3) timer_target_relay = 1; // 1 -> 2 -> 3 -> 1
+         delay(100); 
+      }
       
       // 시간 조절
       else if (p.x >= 15 && p.x <= 85 && p.y >= 135 && p.y <= 185) { // -

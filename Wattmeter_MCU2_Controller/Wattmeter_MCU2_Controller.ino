@@ -1,11 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v209 (Timer Logic Moved to MCU2, Menu Restructured)
+ * 버전: v212 (Timer Logic Refined)
  * 설명: 
+ * - [Mod] Timer End Logic: Explicitly handle Relay 1, 2, or Both and update warning message
+ * - [Mod] Waveform Sampling Delays Doubled for better visibility
  * - [Mod] 타이머 카운트 로직을 MCU2 내부 millis() 기반으로 변경
- * - [Mod] 타이머 종료 시 MCU2가 스스로 트립 명령 전송 및 경고 표시
- * - [Mod] Waveform Labels changed (Short/Mid/Long)
  * - 파형, 고조파, 네트워크 등 기존 기능 유지
  * ==============================================================================
  */
@@ -232,7 +232,10 @@ const char* WAVEFORM_MODE_LABELS[] = {"Cont.", "Trig.", "Single"};
 volatile bool isWaveformFrozen = false; 
 int waveformPeriodIndex = 1; 
 const char* WAVEFORM_PERIOD_LABELS[] = {"Short", "Mid", "Long"};
-const int WAVEFORM_DELAYS_US[] = {50, 100, 200}; 
+
+// [Mod] 샘플링 간격 조정 (기존 50, 100, 200 -> 2배 증가)
+// 파형을 더 넓게 펼쳐서 보여주기 위함
+const int WAVEFORM_DELAYS_US[] = {100, 200, 400}; 
 
 #define PHASOR_CX 235
 #define PHASOR_CY 115
@@ -463,20 +466,35 @@ void loop() {
         if (timer_seconds_left == 0) {
            is_timer_active = false;
            
-           // 1. 릴레이 차단 명령 전송 (MCU1으로 명령만 전송)
-           if (timer_target_relay == 1 || timer_target_relay == 3) {
+           // [Mod] 타겟 릴레이에 따라 차단 명령 전송 및 메시지 설정
+           String tripMsg = "TIMER END";
+           
+           if (timer_target_relay == 1) {
               relay1_state = false;
               txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 1; txJsonDoc["STATE"] = 0;
               serializeJson(txJsonDoc, Serial1); Serial1.println();
+              tripMsg += " (R1)";
            }
-           if (timer_target_relay == 2 || timer_target_relay == 3) {
+           else if (timer_target_relay == 2) {
               relay2_state = false;
               txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 2; txJsonDoc["STATE"] = 0;
               serializeJson(txJsonDoc, Serial1); Serial1.println();
+              tripMsg += " (R2)";
+           }
+           else if (timer_target_relay == 3) { // Both
+              relay1_state = false;
+              relay2_state = false;
+              // R1 OFF
+              txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 1; txJsonDoc["STATE"] = 0;
+              serializeJson(txJsonDoc, Serial1); Serial1.println();
+              // R2 OFF
+              txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 2; txJsonDoc["STATE"] = 0;
+              serializeJson(txJsonDoc, Serial1); Serial1.println();
+              tripMsg += " (ALL)";
            }
            
            // 2. 화면에 경고(트립) 표시
-           warningMessage = "TIMER END"; 
+           warningMessage = tripMsg; 
            warningActive = true;
            screenNeedsRedraw = true;
         }

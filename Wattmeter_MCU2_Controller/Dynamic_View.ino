@@ -1,12 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v208_Fix (Timer Button Visibility & Harmonics Label Refresh)
+ * 버전: v210 (Clean Cont. Mode with Immediate Refresh)
  * 설명: 
- * - [Fix] Timer 화면: START/STOP 버튼 표시 조건 수정 (전역 상태 변수 사용)
- * - [Fix] Harmonics 화면: Y축 단위 라벨 갱신 함수 추가 및 화면 지움 처리
- * - [Mod] Waveform: Cont. Mode uses Real-time Rolling logic
- * - [Mod] Waveform: Trig./Single Mode Pre-fills Lag Buffer for stable Q
+ * - [Mod] Cont. Mode: Replaced Rolling Logic with Immediate Frame Capture (Like Trig mode w/o wait)
+ * - [Mod] Drawing: Added explicit line clearing using previous frame buffer to prevent flicker
+ * - [Fix] Harmonics & Timer logic retained
  * ==============================================================================
  */
 
@@ -325,26 +324,10 @@ void updateYAxisLabels() {
 }
 
 // --- [Fix] Harmonics Y-Axis Update Logic ---
-// 소스 변경 시(V <-> I) 또는 스케일 변경 시 라벨을 지우고 다시 그리는 함수
 void updateHarmonicsYAxisLabels() {
-   // 1. 라벨 영역 지우기 (배경색으로 덮어쓰기)
-   // 그래프 좌측 영역 (X: 0 ~ 40, Y: 45 ~ 190)
    tft.fillRect(0, 45, 39, 150, COLOR_BACKGROUND);
-   
-   // 2. 라벨 다시 그리기 (Static View의 로직 일부 재사용)
-   // * Static View 전체를 다시 호출하면 화면이 깜빡이므로 라벨만 그리는 것이 효율적이나,
-   //   기존 구조상 displayHarmonicsScreenStatic()을 호출하는 것이 가장 안전하게 정렬을 맞춤.
-   //   대신 위에서 fillRect로 지웠으므로 겹쳐 쓰기(잔상) 문제는 해결됨.
    displayHarmonicsScreenStatic();
 }
-
-// --- [Mod] Static Buffers for Rolling Mode ---
-static float roll_v_buf[PLOT_WIDTH];
-static float roll_p2_buf[PLOT_WIDTH];
-static float roll_p3_buf[PLOT_WIDTH];
-static float roll_lag_buf[40]; 
-static int roll_lag_head = 0;
-static bool roll_init = false;
 
 // --- [Mod] Triggered Scope & Rolling Logic ---
 void runCombinedWaveformLoop() {
@@ -359,76 +342,98 @@ void runCombinedWaveformLoop() {
   float eff_I_mult = BASE_I_CALIB_RMS * I_MULTIPLIER;
   float eff_V_off = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
   float eff_I_off = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
+  
+  // [Mod] 변경된 딜레이 값 적용 (MCU2_Controller에서 수정됨)
   int delay_us = WAVEFORM_DELAYS_US[waveformPeriodIndex];
   int center = ADC_MIDPOINT;
   
   bool triggered = false;
 
+  // ============================================================
+  // 1. 샘플링 (Sampling) 영역
+  // ============================================================
+  
+  // [Mod] Cont. Mode (연속 모드) 로직 전면 재작성
+  // - 기존 롤링 방식 제거 -> Trig 모드와 동일한 "전체 프레임 캡처" 방식 적용
+  // - 제로 크로싱 대기 없이 즉시 루프 시작
   if (waveformTriggerMode == 0) {
-      if (!roll_init) {
-          for(int i=0; i<PLOT_WIDTH; i++) { roll_v_buf[i]=0; roll_p2_buf[i]=0; roll_p3_buf[i]=0; }
-          for(int i=0; i<LAG_SIZE; i++) roll_lag_buf[i]=0;
-          roll_init = true;
+      // Q 계산을 위한 Lag Buffer 채우기 (Trig 모드 로직 차용)
+      float local_lag_buf[LAG_SIZE];
+      int lag_head = 0;
+
+      // 버퍼 초기화 (Type 1: P/Q 모드일 때 필요)
+      if (waveformPlotType == 1) {
+          for(int k=0; k<LAG_SIZE; k++) {
+              int r_v = analogRead(PIN_ADC_V);
+              float v = (r_v - center) * eff_V_mult + eff_V_off;
+              local_lag_buf[lag_head] = v;
+              lag_head = (lag_head + 1) % LAG_SIZE;
+              delayMicroseconds(delay_us);
+          }
       }
 
-      for (int i = 0; i < PLOT_WIDTH - 1; i++) {
-          roll_v_buf[i] = roll_v_buf[i+1];
-          roll_p2_buf[i] = roll_p2_buf[i+1];
-          roll_p3_buf[i] = roll_p3_buf[i+1];
+      // 전체 프레임 즉시 샘플링
+      for (int i = 0; i < PLOT_WIDTH; i++) {
+          unsigned long t0 = micros();
+          
+          int r_v = analogRead(PIN_ADC_V);
+          int r_i = analogRead(PIN_ADC_I);
+          int r_i1 = analogRead(PIN_ADC_I1);
+          int r_i2 = analogRead(PIN_ADC_I2);
+          
+          float v = (r_v - center) * eff_V_mult + eff_V_off;
+          float cur = (r_i - center) * eff_I_mult - eff_I_off;
+          float cur1 = (r_i1 - center) * eff_I_mult - eff_I_off;
+          float cur2 = (r_i2 - center) * eff_I_mult - eff_I_off;
+
+          if (waveformPlotType == 0) { // V/I
+             v_buf[i] = v;
+             p2_buf[i] = cur;
+          } 
+          else if (waveformPlotType == 1) { // P/Q
+             float p = v * cur;
+             v_buf[i] = p; 
+             
+             local_lag_buf[lag_head] = v;
+             int lag_read_idx = (lag_head + 1) % LAG_SIZE;
+             float v_lag = local_lag_buf[lag_read_idx];
+             lag_head = lag_read_idx;
+             
+             float q = v_lag * cur;
+             p2_buf[i] = q;
+          } 
+          else { // I/I1/I2
+             v_buf[i] = cur;
+             p2_buf[i] = cur1; 
+             p3_buf[i] = cur2;
+          }
+          
+          // 사용자 입력 및 통신 체크 (응답성 유지)
+          checkSerialInput();
+          checkTouchInput();
+          if (screenNeedsRedraw) return;
+
+          while (micros() - t0 < delay_us);
       }
-
-      int r_v = analogRead(PIN_ADC_V);
-      int r_i = analogRead(PIN_ADC_I);
-      int r_i1 = analogRead(PIN_ADC_I1);
-      int r_i2 = analogRead(PIN_ADC_I2);
-      
-      float v = (r_v - center) * eff_V_mult + eff_V_off;
-      float cur = (r_i - center) * eff_I_mult - eff_I_off;
-      float cur1 = (r_i1 - center) * eff_I_mult - eff_I_off;
-      float cur2 = (r_i2 - center) * eff_I_mult - eff_I_off;
-
-      if (waveformPlotType == 0) { 
-         roll_v_buf[PLOT_WIDTH-1] = v;
-         roll_p2_buf[PLOT_WIDTH-1] = cur;
-      } 
-      else if (waveformPlotType == 1) { 
-         roll_lag_buf[roll_lag_head] = v;
-         int lag_read_idx = (roll_lag_head + 1) % LAG_SIZE;
-         float v_lag = roll_lag_buf[lag_read_idx];
-         roll_lag_head = lag_read_idx;
-
-         roll_v_buf[PLOT_WIDTH-1] = v * cur; 
-         roll_p2_buf[PLOT_WIDTH-1] = v_lag * cur; 
-      } 
-      else { 
-         roll_v_buf[PLOT_WIDTH-1] = cur;
-         roll_p2_buf[PLOT_WIDTH-1] = cur1;
-         roll_p3_buf[PLOT_WIDTH-1] = cur2;
-      }
-
-      for(int i=0; i<PLOT_WIDTH; i++) {
-          v_buf[i] = roll_v_buf[i];
-          p2_buf[i] = roll_p2_buf[i];
-          p3_buf[i] = roll_p3_buf[i];
-      }
-      
-      triggered = false; 
   } 
+  // [Keep] Trig. / Single Mode (기존 로직 유지 - 제로 크로싱 대기 포함)
   else {
       unsigned long trigger_start = millis();
-      int hyst = 50; 
+      int hyst = 50;
       int trig_state = 0;
       
+      // 제로 크로싱 대기 (Timeout 50ms)
       while (millis() - trigger_start < 50) {
-         checkTouchInput(); if (screenNeedsRedraw) return;
+         checkTouchInput();
+         if (screenNeedsRedraw) return;
          int raw_v = analogRead(PIN_ADC_V);
          if (trig_state == 0) { if (raw_v < (center - hyst)) trig_state = 1; } 
          else if (trig_state == 1) { if (raw_v > (center + hyst)) { triggered = true; break; } }
       }
 
+      // Lag Buffer Pre-fill
       float local_lag_buf[LAG_SIZE];
       int lag_head = 0;
-      
       for(int k=0; k<LAG_SIZE; k++) {
           int r_v = analogRead(PIN_ADC_V);
           float v = (r_v - center) * eff_V_mult + eff_V_off;
@@ -437,20 +442,22 @@ void runCombinedWaveformLoop() {
           delayMicroseconds(delay_us);
       }
       
+      // 프레임 샘플링
       for (int i = 0; i < PLOT_WIDTH; i++) {
         unsigned long t0 = micros();
         int r_v = analogRead(PIN_ADC_V);
         int r_i = analogRead(PIN_ADC_I);
         int r_i1 = analogRead(PIN_ADC_I1);
         int r_i2 = analogRead(PIN_ADC_I2);
-        
+
         float v = (r_v - center) * eff_V_mult + eff_V_off;
         float cur = (r_i - center) * eff_I_mult - eff_I_off;
         float cur1 = (r_i1 - center) * eff_I_mult - eff_I_off;
         float cur2 = (r_i2 - center) * eff_I_mult - eff_I_off;
-        
+
         if (waveformPlotType == 0) { 
-           v_buf[i] = v; p2_buf[i] = cur;
+           v_buf[i] = v;
+           p2_buf[i] = cur;
         } 
         else if (waveformPlotType == 1) { 
            float p = v * cur;
@@ -462,15 +469,19 @@ void runCombinedWaveformLoop() {
            lag_head = lag_read_idx;
            
            float q = v_lag * cur;
-           p2_buf[i] = q; 
+           p2_buf[i] = q;
         } 
         else { 
-           v_buf[i] = cur; p2_buf[i] = cur1; p3_buf[i] = cur2;
+           v_buf[i] = cur;
+           p2_buf[i] = cur1; p3_buf[i] = cur2;
         }
         while (micros() - t0 < delay_us);
       }
   }
   
+  // ============================================================
+  // 2. 오토 레인징 (Auto-ranging) - 기존 유지
+  // ============================================================
   float max_val_p1 = 0.0, max_val_p2 = 0.0;
   for(int i=0; i<PLOT_WIDTH; i++) {
      if (abs(v_buf[i]) > max_val_p1) max_val_p1 = abs(v_buf[i]);
@@ -483,11 +494,11 @@ void runCombinedWaveformLoop() {
   static int range_idx_i = NUM_I_RANGES - 1;
   static int range_idx_p = NUM_P_RANGES - 1;
   bool rangeChanged = false;
-  
+
   auto updateRange = [&](int &idx, float peak, const float* ranges, int count) {
       bool changed = false;
       if (peak > ranges[idx]) {
-          while (idx < count - 1 && peak > ranges[idx]) idx++; 
+          while (idx < count - 1 && peak > ranges[idx]) idx++;
           changed = true;
       } else if (idx > 0) {
           if (peak < (ranges[idx-1] * 0.8)) { idx--; changed = true; }
@@ -515,39 +526,64 @@ void runCombinedWaveformLoop() {
      tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, COLOR_GRID);
   }
   
+  // ============================================================
+  // 3. 그리기 (Drawing) - Clearing 로직 강화
+  // ============================================================
   float scale1 = (plot1_axis_max == 0) ? 0 : (PLOT_HEIGHT_HALF / plot1_axis_max);
   float scale2 = (plot2_axis_max == 0) ? 0 : (PLOT_HEIGHT_HALF / plot2_axis_max);
   float scale3 = (plot3_axis_max == 0) ? 0 : (PLOT_HEIGHT_HALF / plot3_axis_max); 
+
+  // [Mod] 이전 프레임의 Y좌표 추적을 위한 지역 변수
+  // last_frame_y_plot 배열은 루프 돌면서 즉시 갱신되므로, 
+  // 지우기(Clearing) 단계에서 필요한 '이전 X점의 Y값'을 보존해야 함.
+  int py1_old = PLOT_Y_CENTER, py2_old = PLOT_Y_CENTER, py3_old = PLOT_Y_CENTER; 
+  int py1_new = PLOT_Y_CENTER, py2_new = PLOT_Y_CENTER, py3_new = PLOT_Y_CENTER;
 
   tft.startWrite();
   for (int i = 0; i < PLOT_WIDTH; i++) {
      int x = PLOT_X_START + i;
      
-     if (i > 0) {
-         int xp = x - 1;
-         if (last_frame_y_plot1[i] != PLOT_Y_CENTER || last_frame_y_plot1[i-1] != PLOT_Y_CENTER)
-            tft.drawLine(xp, last_frame_y_plot1[i-1], x, last_frame_y_plot1[i], COLOR_BACKGROUND);
-         if (last_frame_y_plot2[i] != PLOT_Y_CENTER || last_frame_y_plot2[i-1] != PLOT_Y_CENTER)
-            tft.drawLine(xp, last_frame_y_plot2[i-1], x, last_frame_y_plot2[i], COLOR_BACKGROUND);
-         if (waveformPlotType == 2) {
-            if (last_frame_y_plot3[i] != PLOT_Y_CENTER || last_frame_y_plot3[i-1] != PLOT_Y_CENTER)
-                tft.drawLine(xp, last_frame_y_plot3[i-1], x, last_frame_y_plot3[i], COLOR_BACKGROUND);
-         }
-     }
-     
+     // 현재 프레임의 이전 값 (지우기 용) -> 루프 시작 시점에 배열에서 읽어야 함
+     int cy1_old = last_frame_y_plot1[i];
+     int cy2_old = last_frame_y_plot2[i];
+     int cy3_old = last_frame_y_plot3[i];
+
+     // 새로운 Y값 계산
      int y1 = constrain(PLOT_Y_CENTER - (int)(v_buf[i] * scale1), PLOT_Y_START, PLOT_Y_END);
      int y2 = constrain(PLOT_Y_CENTER - (int)(p2_buf[i] * scale2), PLOT_Y_START, PLOT_Y_END);
      int y3 = PLOT_Y_CENTER;
      if (waveformPlotType == 2) y3 = constrain(PLOT_Y_CENTER - (int)(p3_buf[i] * scale3), PLOT_Y_START, PLOT_Y_END);
-     
+
+     // 그리기 (첫 점 제외)
      if (i > 0) {
          int xp = x - 1;
-         tft.drawLine(xp, last_frame_y_plot1[i-1], x, y1, COLOR_BLUE);
-         tft.drawLine(xp, last_frame_y_plot2[i-1], x, y2, COLOR_ORANGE);
-         if (waveformPlotType == 2) tft.drawLine(xp, last_frame_y_plot3[i-1], x, y3, COLOR_RED);
+         
+         // [Clear] 이전 선 지우기 (이전 프레임의 선)
+         // 이전 점(xp, py_old) -> 현재 점(x, cy_old)
+         if (cy1_old != PLOT_Y_CENTER || py1_old != PLOT_Y_CENTER)
+            tft.drawLine(xp, py1_old, x, cy1_old, COLOR_BACKGROUND);
+         if (cy2_old != PLOT_Y_CENTER || py2_old != PLOT_Y_CENTER)
+            tft.drawLine(xp, py2_old, x, cy2_old, COLOR_BACKGROUND);
+         if (waveformPlotType == 2) {
+            if (cy3_old != PLOT_Y_CENTER || py3_old != PLOT_Y_CENTER)
+                tft.drawLine(xp, py3_old, x, cy3_old, COLOR_BACKGROUND);
+         }
+
+         // [Draw] 새로운 선 그리기
+         // 이전 점(xp, py_new) -> 현재 점(x, y)
+         tft.drawLine(xp, py1_new, x, y1, COLOR_BLUE);
+         tft.drawLine(xp, py2_new, x, y2, COLOR_ORANGE);
+         if (waveformPlotType == 2) tft.drawLine(xp, py3_new, x, y3, COLOR_RED);
      }
      
-     last_frame_y_plot1[i] = y1; last_frame_y_plot2[i] = y2; last_frame_y_plot3[i] = y3;
+     // 배열 갱신 (다음 프레임을 위해 현재 값 저장)
+     last_frame_y_plot1[i] = y1; 
+     last_frame_y_plot2[i] = y2; 
+     last_frame_y_plot3[i] = y3;
+
+     // 다음 루프를 위해 현재 값을 '이전 값' 변수에 저장
+     py1_old = cy1_old; py2_old = cy2_old; py3_old = cy3_old;
+     py1_new = y1;      py2_new = y2;      py3_new = y3;
   }
   tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, COLOR_GRID);
   tft.endWrite();
