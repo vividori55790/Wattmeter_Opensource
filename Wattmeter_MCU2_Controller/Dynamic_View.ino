@@ -1,10 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 3. View_Dynamic.ino
- * 버전: v212 (Waveform & Harmonics Update)
+ * 버전: v205 (Dual Y-Axis Logic, Log Harmonics Calculation, Timer UI)
  * 설명: 
- * - [Mod] runCombinedWaveformLoop: Wattmeter.ino의 Trigger/Drawing 로직 완전 이식
- * - [Mod] 고조파 화면: 수치 표시(좌측) 및 그래프(하단) 구현
+ * - 파형 화면: 좌측(Plot1), 우측(Plot2) Y축 라벨 그리기
+ * - 고조파 화면: 기본값(RMS) * 비율 = 절대값 계산 후 로그 매핑, Source별 색상 적용
+ * - 타이머 화면: 단일 버튼(Toggle Target) 및 통합 숫자 표시
+ * - 네트워크 화면: 버튼 텍스트 OFF > WAIT > ON 로직 적용
  * ==============================================================================
  */
 
@@ -51,11 +53,14 @@ void printTFTValue(int x, int y, String value, String prev_value, uint16_t color
   tft.print(value);
 }
 
+// --- [Mod] 네트워크 설정 화면 동적 갱신 ---
 void runSettingsNetwork() {
+  // 상태 표시 (WAIT 상태 포함)
   if (screenNeedsRedraw) {
     tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
   }
 
+  // 버튼 텍스트 및 상태 (OFF -> WAIT -> ON)
   static WifiState prev_wifiState = (WifiState)-1;
   
   if (wifiState != prev_wifiState || screenNeedsRedraw) {
@@ -73,10 +78,11 @@ void runSettingsNetwork() {
        btnText = "WAITING...";
     } else {
        statusMsg = "WiFi: OFF";
-       statusColor = COLOR_BUTTON; 
+       statusColor = COLOR_BUTTON; // Greyish/Blue
        btnText = "TURN ON";
     }
 
+    // 상태 바
     tft.fillRoundRect(60, 50, 200, 50, 10, statusColor);
     tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
     tft.setTextColor((wifiState==WIFI_CONNECTED_STATE)?ILI9341_BLACK:COLOR_BUTTON_TEXT); 
@@ -86,6 +92,11 @@ void runSettingsNetwork() {
     tft.setCursor(60 + (200 - w)/2, 65);
     tft.print(statusMsg);
 
+    // 버튼 (기존 터치 영역 55~265, 45~105은 상태 표시바이고, 실제 토글 버튼은 터치 로직에 있음.
+    // 여기서는 버튼이 상태바 역할도 하므로 텍스트만 업데이트)
+    // 요구사항: "와이파이 연결 버튼의 색깔을 바꾸지 말고 표시되는 텍스트만 변경해서 출력해줘."
+    // 하지만 현재 UI 구조상 상태바가 곧 버튼임. 
+    
     prev_wifiState = wifiState;
   }
 
@@ -107,6 +118,7 @@ void runSettingsNetwork() {
   }
 }
 
+// --- 메인 전력 화면 값 업데이트 ---
 void displayMainScreenValues() {
   if (isMainPowerFrozen) return; 
 
@@ -212,6 +224,7 @@ void displayMainScreenValues() {
   prev_thd_i_main = thd_i_value;
 }
 
+// --- 위상차 화면 값 업데이트 ---
 void displayPhaseScreenValues() {
   if (isPhaseFrozen) return; 
 
@@ -273,84 +286,156 @@ void displayPhaseScreenValues() {
   }
 }
 
-// [Mod] Wattmeter.ino 원본 스타일 복원 (Scale Finding)
 float findAxisStep(float peak, const float* steps, int num_steps) {
   for (int i = 0; i < num_steps; i++) {
-    if (peak <= steps[i]) {
-      return steps[i]; 
-    }
+    if (peak <= steps[i]) return steps[i]; 
   }
   return steps[num_steps - 1]; 
 }
 
+// --- [Mod] 동적 Y축 라벨 (좌/우 표시) ---
 void updateYAxisLabels() {
   tft.setTextSize(1);
   char buffer[10]; 
   
-  // Clear Labels Area
-  tft.fillRect(0, PLOT_Y_START, PLOT_X_START - 1, 20, COLOR_BACKGROUND); 
-  tft.fillRect(0, PLOT_Y_END - 10, PLOT_X_START - 1, 10, COLOR_BACKGROUND); 
   tft.fillRect(PLOT_X_END + 1, PLOT_Y_START, SCREEN_WIDTH - PLOT_X_END - 1, 20, COLOR_BACKGROUND); 
   tft.fillRect(PLOT_X_END + 1, PLOT_Y_END - 10, SCREEN_WIDTH - PLOT_X_END - 1, 10, COLOR_BACKGROUND); 
-  
-  tft.setTextColor(COLOR_ORANGE);
-  if (I_axis_max < 1.0) { 
-    dtostrf(I_axis_max * 1000, 3, 0, buffer);
-    tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("mA");
-    tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("mA");
-  } else { 
-    dtostrf(I_axis_max, 3, 1, buffer);
-    tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("A");
-    tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("A");
-  }
+  tft.fillRect(0, PLOT_Y_START, PLOT_X_START - 1, 20, COLOR_BACKGROUND); 
+  tft.fillRect(0, PLOT_Y_END - 10, PLOT_X_START - 1, 10, COLOR_BACKGROUND); 
+  tft.fillRect(0, PLOT_Y_CENTER - 15, PLOT_X_START - 1, 10, COLOR_BACKGROUND); 
+  tft.fillRect(0, PLOT_Y_CENTER + 5, PLOT_X_START - 1, 10, COLOR_BACKGROUND); 
 
-  tft.setTextColor(COLOR_BLUE);
-  dtostrf(V_axis_max, 3, 0, buffer); 
-  tft.setCursor(PLOT_X_END + 5, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("V"); 
-  tft.setCursor(PLOT_X_END + 5, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("V");
+  // [Mod] 좌측(Plot1), 우측(Plot2) 모두 라벨링
+  if (waveformPlotType == 0) { // V(Left)/I(Right)
+    // Left Axis (V)
+    tft.setTextColor(COLOR_BLUE);
+    dtostrf(plot1_axis_max, 3, 0, buffer); 
+    tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("V"); 
+    tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("V");
+    
+    // Right Axis (I)
+    tft.setTextColor(COLOR_ORANGE);
+    if (plot2_axis_max < 1.0) { 
+      dtostrf(plot2_axis_max * 1000, 3, 0, buffer);
+      tft.setCursor(PLOT_X_END + 2, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("mA");
+      tft.setCursor(PLOT_X_END + 2, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("mA");
+    } else { 
+      dtostrf(plot2_axis_max, 3, 1, buffer);
+      tft.setCursor(PLOT_X_END + 2, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("A");
+      tft.setCursor(PLOT_X_END + 2, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("A");
+    }
+
+  } else if (waveformPlotType == 1) { // P/Q (Both W/Var)
+    // Left (P)
+    tft.setTextColor(COLOR_BLUE);
+    dtostrf(plot1_axis_max, 3, 0, buffer); 
+    tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("W"); 
+    tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("W");
+    
+    // Right (Q)
+    tft.setTextColor(COLOR_ORANGE);
+    dtostrf(plot2_axis_max, 3, 0, buffer); 
+    tft.setCursor(PLOT_X_END + 2, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("Vr"); 
+    tft.setCursor(PLOT_X_END + 2, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("Vr");
+  } else { // I/I1/I2 (All Amps)
+    tft.setTextColor(COLOR_TEXT_PRIMARY); 
+    if (plot1_axis_max < 1.0) { 
+      dtostrf(plot1_axis_max * 1000, 3, 0, buffer);
+      tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("mA");
+      tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("mA");
+    } else { 
+      dtostrf(plot1_axis_max, 3, 1, buffer);
+      tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("A");
+      tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("A");
+    }
+  }
 }
 
-// [Mod] Wattmeter.ino 원본 스타일 복원 (Drawing Loop)
 void runCombinedWaveformLoop() {
-  float volts_to_pixels_scale = (V_axis_max < 1.0) ? 0 : (PLOT_HEIGHT_HALF / V_axis_max);
-  float amps_to_pixels_scale = (I_axis_max < 0.01) ? 0 : (PLOT_HEIGHT_HALF / I_axis_max);
+  if (isWaveformFrozen) return;
 
-  float new_frame_V_peak = 0.0;
-  float new_frame_I_peak = 0.0;
-  
-  int new_y_v[PLOT_WIDTH];
-  int new_y_i[PLOT_WIDTH];
+  const int LAG_BUF_SIZE = 40; 
+  static float v_lag_buffer[LAG_BUF_SIZE];
+  static int buf_head = 0;
 
-  unsigned long startTime = micros();
+  float scale_p1, scale_p2, scale_p3; 
+  float new_frame_p1_peak = 0.0, new_frame_p2_peak = 0.0, new_frame_p3_peak = 0.0;
+  int new_y_plot1[PLOT_WIDTH], new_y_plot2[PLOT_WIDTH], new_y_plot3[PLOT_WIDTH];
 
-  float effective_V_Calib = BASE_V_CALIB_RMS * V_MULTIPLIER;
-  float effective_I_Calib = BASE_I_CALIB_RMS * I_MULTIPLIER;
-  float effective_V_Offset = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
-  float effective_I_Offset = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
+  if (waveformPlotType == 0) { 
+    scale_p1 = (plot1_axis_max < 1.0) ? 0 : (PLOT_HEIGHT_HALF / plot1_axis_max);
+    scale_p2 = (plot2_axis_max < 0.01) ? 0 : (PLOT_HEIGHT_HALF / plot2_axis_max);
+  } else if (waveformPlotType == 1) { 
+    scale_p1 = (plot1_axis_max < 1.0) ? 0 : (PLOT_HEIGHT_HALF / plot1_axis_max);
+    scale_p2 = (plot2_axis_max < 1.0) ? 0 : (PLOT_HEIGHT_HALF / plot2_axis_max);
+  } else { 
+    scale_p1 = (plot1_axis_max < 0.01) ? 0 : (PLOT_HEIGHT_HALF / plot1_axis_max);
+    scale_p2 = scale_p1; scale_p3 = scale_p1;
+  }
+
+  float eff_V_mult = BASE_V_CALIB_RMS * V_MULTIPLIER;
+  float eff_I_mult = BASE_I_CALIB_RMS * I_MULTIPLIER;
+  float eff_V_off = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
+  float eff_I_off = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
+
+  if (waveformTriggerMode == 1) {
+      long timeout = micros() + 16000; 
+      int prev_v = analogRead(PIN_ADC_V) - ADC_MIDPOINT;
+      while(micros() < timeout) {
+          int curr_v = analogRead(PIN_ADC_V) - ADC_MIDPOINT;
+          if (prev_v < 0 && curr_v >= 0) break; 
+          prev_v = curr_v;
+      }
+  }
 
   for (int i = 0; i < PLOT_WIDTH; i++) {
-    // 루프 중에도 터치/시리얼 체크 (응답성 유지)
-    checkTouchInput();
-    checkSerialInput();
-    if(screenNeedsRedraw || warningActive) return;
+    checkTouchInput(); 
+    checkSerialInput(); 
 
-    int V_raw = analogRead(PIN_ADC_V);
-    int I_raw = analogRead(PIN_ADC_I);
-    int V_ac_bits = V_raw - (int)ADC_MIDPOINT;
-    int I_ac_bits = I_raw - (int)ADC_MIDPOINT;
-    
-    float V_mains_instant = V_ac_bits * effective_V_Calib + effective_V_Offset;
-    float I_mains_instant = I_ac_bits * effective_I_Calib - effective_I_Offset;
+    if (screenNeedsRedraw || warningActive) {
+       if(screenNeedsRedraw) isWaveformFrozen = false;
+       return;
+    }
 
-    if (abs(V_mains_instant) > new_frame_V_peak) new_frame_V_peak = abs(V_mains_instant);
-    if (abs(I_mains_instant) > new_frame_I_peak) new_frame_I_peak = abs(I_mains_instant);
+    int raw_v = analogRead(PIN_ADC_V);
+    int raw_i = analogRead(PIN_ADC_I);
+    int raw_i1 = analogRead(PIN_ADC_I1);
+    int raw_i2 = analogRead(PIN_ADC_I2);
 
-    int y_pos_v = PLOT_Y_CENTER - (int)(V_mains_instant * volts_to_pixels_scale);
-    new_y_v[i] = constrain(y_pos_v, PLOT_Y_START, PLOT_Y_END);
-    int y_pos_i = PLOT_Y_CENTER - (int)(I_mains_instant * amps_to_pixels_scale);
-    new_y_i[i] = constrain(y_pos_i, PLOT_Y_START, PLOT_Y_END);
-    
-    while(micros() - startTime < (i + 1) * WAVEFORM_SAMPLE_PERIOD_US);
+    float v_inst = (raw_v - ADC_MIDPOINT) * eff_V_mult + eff_V_off;
+    float i_inst = (raw_i - ADC_MIDPOINT) * eff_I_mult - eff_I_off;
+    float i1_inst = (raw_i1 - ADC_MIDPOINT) * eff_I_mult - eff_I_off;
+    float i2_inst = (raw_i2 - ADC_MIDPOINT) * eff_I_mult - eff_I_off;
+
+    float val1 = 0, val2 = 0, val3 = 0;
+
+    if (waveformPlotType == 0) { // V/I
+       val1 = v_inst;
+       val2 = i_inst;
+    } 
+    else if (waveformPlotType == 1) { // P/Q
+       val1 = v_inst * i_inst; 
+       v_lag_buffer[buf_head] = v_inst;
+       int lag_idx = (buf_head + 1) % LAG_BUF_SIZE;
+       float v_lagged = v_lag_buffer[lag_idx];
+       buf_head = lag_idx;
+       val2 = v_lagged * i_inst; 
+    } 
+    else { // I/I1/I2
+       val1 = i_inst;
+       val2 = i1_inst;
+       val3 = i2_inst;
+    }
+
+    if (abs(val1) > new_frame_p1_peak) new_frame_p1_peak = abs(val1);
+    if (abs(val2) > new_frame_p2_peak) new_frame_p2_peak = abs(val2);
+    if (abs(val3) > new_frame_p3_peak) new_frame_p3_peak = abs(val3);
+
+    new_y_plot1[i] = constrain(PLOT_Y_CENTER - (int)(val1 * scale_p1), PLOT_Y_START, PLOT_Y_END);
+    new_y_plot2[i] = constrain(PLOT_Y_CENTER - (int)(val2 * scale_p2), PLOT_Y_START, PLOT_Y_END);
+    new_y_plot3[i] = constrain(PLOT_Y_CENTER - (int)(val3 * scale_p3), PLOT_Y_START, PLOT_Y_END);
+
+    delayMicroseconds(WAVEFORM_DELAYS_US[waveformPeriodIndex]); 
   }
 
   tft.startWrite(); 
@@ -358,40 +443,64 @@ void runCombinedWaveformLoop() {
   for (int i = 1; i < PLOT_WIDTH; i++) {
       int x_curr = PLOT_X_START + i;
       int x_prev = PLOT_X_START + i - 1;
-      if(last_frame_y_v[i] != PLOT_Y_CENTER || last_frame_y_v[i-1] != PLOT_Y_CENTER) {
-          tft.drawLine(x_prev, last_frame_y_v[i-1], x_curr, last_frame_y_v[i], COLOR_BACKGROUND); 
+      
+      if(last_frame_y_plot1[i] != PLOT_Y_CENTER || last_frame_y_plot1[i-1] != PLOT_Y_CENTER) 
+          tft.drawLine(x_prev, last_frame_y_plot1[i-1], x_curr, last_frame_y_plot1[i], COLOR_BACKGROUND); 
+      tft.drawLine(x_prev, new_y_plot1[i-1], x_curr, new_y_plot1[i], COLOR_BLUE);
+      
+      if(last_frame_y_plot2[i] != PLOT_Y_CENTER || last_frame_y_plot2[i-1] != PLOT_Y_CENTER) 
+          tft.drawLine(x_prev, last_frame_y_plot2[i-1], x_curr, last_frame_y_plot2[i], COLOR_BACKGROUND); 
+      tft.drawLine(x_prev, new_y_plot2[i-1], x_curr, new_y_plot2[i], COLOR_ORANGE);
+
+      if (waveformPlotType == 2) {
+        if(last_frame_y_plot3[i] != PLOT_Y_CENTER || last_frame_y_plot3[i-1] != PLOT_Y_CENTER) 
+            tft.drawLine(x_prev, last_frame_y_plot3[i-1], x_curr, last_frame_y_plot3[i], COLOR_BACKGROUND); 
+        tft.drawLine(x_prev, new_y_plot3[i-1], x_curr, new_y_plot3[i], COLOR_RED);
       }
-      if(last_frame_y_i[i] != PLOT_Y_CENTER || last_frame_y_i[i-1] != PLOT_Y_CENTER) {
-          tft.drawLine(x_prev, last_frame_y_i[i-1], x_curr, last_frame_y_i[i], COLOR_BACKGROUND); 
-      }
-      tft.drawLine(x_prev, new_y_v[i-1], x_curr, new_y_v[i], COLOR_BLUE);
-      tft.drawLine(x_prev, new_y_i[i-1], x_curr, new_y_i[i], COLOR_ORANGE);
   }
   tft.endWrite();
 
   for (int i = 0; i < PLOT_WIDTH; i++) {
-      last_frame_y_v[i] = new_y_v[i];
-      last_frame_y_i[i] = new_y_i[i];
+      last_frame_y_plot1[i] = new_y_plot1[i];
+      last_frame_y_plot2[i] = new_y_plot2[i];
+      last_frame_y_plot3[i] = new_y_plot3[i];
   }
 
-  // Auto Scaling
-  float new_V_axis = findAxisStep(new_frame_V_peak, V_AXIS_STEPS, NUM_V_STEPS);
-  float new_I_axis = findAxisStep(new_frame_I_peak, I_AXIS_STEPS, NUM_I_STEPS);
+  float new_p1_axis = plot1_axis_max;
+  float new_p2_axis = plot2_axis_max;
+  bool axisChanged = false;
 
-  if (new_V_axis != V_axis_max || new_I_axis != I_axis_max) {
-    V_axis_max = new_V_axis;
-    I_axis_max = new_I_axis;
+  if (waveformPlotType == 0) { // V/I
+    new_p1_axis = findAxisStep(new_frame_p1_peak, V_RANGES, NUM_V_RANGES);
+    new_p2_axis = findAxisStep(new_frame_p2_peak, I_RANGES, NUM_I_RANGES);
+  } else if (waveformPlotType == 1) { // P/Q
+    new_p1_axis = findAxisStep(new_frame_p1_peak, P_RANGES, NUM_P_RANGES);
+    new_p2_axis = findAxisStep(new_frame_p2_peak, P_RANGES, NUM_P_RANGES); 
+  } else { // I/I1/I2
+    float max_peak_all = max(new_frame_p1_peak, max(new_frame_p2_peak, new_frame_p3_peak));
+    new_p1_axis = findAxisStep(max_peak_all, I_RANGES, NUM_I_RANGES);
+    if (new_p1_axis != plot1_axis_max) axisChanged = true;
+  }
+
+  if (new_p1_axis != plot1_axis_max || new_p2_axis != plot2_axis_max || axisChanged) {
+    plot1_axis_max = new_p1_axis;
+    if (waveformPlotType != 2) plot2_axis_max = new_p2_axis;
     updateYAxisLabels();
+  }
+  
+  if (waveformTriggerMode == 2 && !isWaveformFrozen) {
+    isWaveformFrozen = true;
   }
 }
 
+// [Mod] HARMONICS 화면 값 업데이트 (로그 스케일 절대값, 색상 분리)
 void displayHarmonicsScreenValues() {
   if (harmonicsSrcLabel != prev_harmonicsSrcLabel) {
      drawButton(10, 200, 90, 35, harmonicsSrcLabel);
      prev_harmonicsSrcLabel = harmonicsSrcLabel;
   }
   
-  String currRunLabel = isHarmonicsFrozen ? "RUN" : "HOLD";
+  String currRunLabel = isHarmonicsFrozen ? "HOLD" : "RUN";
   if (currRunLabel != prev_harmonicsRunLabel) {
      drawButton(110, 200, 100, 35, currRunLabel);
      prev_harmonicsRunLabel = currRunLabel;
@@ -399,62 +508,96 @@ void displayHarmonicsScreenValues() {
 
   if (isHarmonicsFrozen) return;
 
-  // [Mod] 데이터 포인터 설정 (MCU1에서 수신한 실제 데이터 사용)
   float* dataPtr = (harmonicsSource == 0) ? v_harmonics : i_harmonics;
-  // 기본파 값(100%) 참조 (MCU1에서 수신한 RMS가 기본임)
-  float rms_val = (harmonicsSource == 0) ? V_rms : I_rms;
-  float thd_val = (harmonicsSource == 0) ? thd_v_value : thd_i_value;
-
-  // [Mod] 좌측 수치 표시 (THD, RMS)
-  static float prev_disp_thd = -1.0;
-  static float prev_disp_rms = -1.0;
+  float fundamental_rms = (harmonicsSource == 0) ? V_rms : I_rms;
   
-  printTFTValue(10, 75, thd_val * 100.0, prev_disp_thd * 100.0, 1, COLOR_RED, " %");
-  printTFTValue(10, 125, rms_val, prev_disp_rms, 1, COLOR_TEXT_PRIMARY, (harmonicsSource == 0) ? " V" : " A");
-  
-  prev_disp_thd = thd_val;
-  prev_disp_rms = rms_val;
-
-  // [Mod] 그래프 표시
-  int graph_x = 80;
-  int graph_y = 45;
-  int graph_h = 145;
-  int bar_w = 230 / 15; 
   static int prev_bar_heights[16]; 
-  
-  // i=1(Fundamental) 부터 15차까지
-  for (int i = 1; i <= 15; i++) {
-      float val_pct = dataPtr[i]; // MCU1 sends percentage
-      int bar_h = 0;
-      
-      // Log Scale or Linear? MCU1 sends percent. Linear is easier to read for THD.
-      // 100% = Full Height.
-      if (val_pct > 100.0) val_pct = 100.0;
-      if (val_pct < 0.0) val_pct = 0.0;
-      
-      // 1차 고조파는 100%이므로 꽉 참. 나머지는 작게 나옴.
-      // 로그 스케일 적용하여 작은 고조파도 보이게 함 (Log10)
-      // 0.1% ~ 100% 매핑
-      if (val_pct > 0.1) {
-         float log_val = log10(val_pct); // log10(100)=2, log10(0.1)=-1
-         // Map -1~2 to 0~Height
-         float normalized = (log_val + 1.0) / 3.0; 
-         if(normalized < 0) normalized = 0;
-         bar_h = (int)(normalized * graph_h);
-      } else {
-         bar_h = 1;
-      }
-      
-      if (bar_h != prev_bar_heights[i]) {
-          int x_pos = graph_x + (i - 1) * bar_w + 2;
-          int curr_y = graph_y + graph_h - bar_h;
-          uint16_t color = (harmonicsSource == 0) ? COLOR_BLUE : COLOR_ORANGE;
-          
-          tft.fillRect(x_pos, graph_y, bar_w - 4, graph_h, COLOR_BACKGROUND); // Clear
-          tft.fillRect(x_pos, curr_y, bar_w - 4, bar_h, color); // Draw
-          
-          prev_bar_heights[i] = bar_h;
-      }
+  static float prev_text_vals[8];  
+
+  if (harmonicsViewMode == 0) {
+     int graph_x = 40;
+     int graph_y = 45;
+     int graph_h = 145;
+     int bar_w = 270 / 15; 
+
+     // [Mod] Y축 라벨 (Log Scale) 업데이트
+     tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
+     
+     // 범위 설정: 전압(1V~1000V), 전류(0.01A~10A) - 둘 다 4 Decades
+     float min_log = (harmonicsSource == 0) ? 0.0 : -2.0; // log10(1)=0, log10(0.01)=-2
+     float max_log = (harmonicsSource == 0) ? 3.0 : 1.0;  // log10(1000)=3, log10(10)=1
+     
+     // 그리드 라벨 다시 그리기 (소스 변경 시 값 변경)
+     if (screenNeedsRedraw || harmonicsSrcLabel != prev_harmonicsSrcLabel) {
+        tft.fillRect(0, graph_y-10, 35, graph_h+20, COLOR_BACKGROUND); // 지우기
+        int h_step = graph_h / 3; // 4 lines: 0, 1/3, 2/3, 1
+        
+        if (harmonicsSource == 0) { // Voltage: 1000, 100, 10, 1
+           tft.setCursor(5, graph_y-3); tft.print("1kV");
+           tft.setCursor(5, graph_y + h_step - 3); tft.print("100");
+           tft.setCursor(5, graph_y + h_step*2 - 3); tft.print("10V");
+           tft.setCursor(5, graph_y + graph_h - 3); tft.print("1V");
+        } else { // Current: 10, 1, 0.1, 0.01
+           tft.setCursor(5, graph_y-3); tft.print("10A");
+           tft.setCursor(5, graph_y + h_step - 3); tft.print("1A");
+           tft.setCursor(5, graph_y + h_step*2 - 3); tft.print("0.1");
+           tft.setCursor(2, graph_y + graph_h - 3); tft.print(".01");
+        }
+     }
+
+     for (int i = 1; i <= 15; i++) {
+        // 절대값 계산 (Percent -> Abs)
+        float val_abs = (dataPtr[i] / 100.0) * fundamental_rms;
+        
+        int bar_h = 0;
+        if (val_abs > 0) {
+            float val_log = log10(val_abs);
+            // Normalize: (val_log - min) / (max - min)
+            float normalized = (val_log - min_log) / (max_log - min_log);
+            if (normalized > 1.0) normalized = 1.0;
+            if (normalized < 0.0) normalized = 0.0;
+            bar_h = (int)(normalized * graph_h);
+        } else {
+            bar_h = 1;
+        }
+        
+        if (bar_h != prev_bar_heights[i]) {
+            int x_pos = graph_x + (i - 1) * bar_w + 2;
+            int prev_y = graph_y + graph_h - prev_bar_heights[i];
+            int curr_y = graph_y + graph_h - bar_h;
+            
+            // [Mod] 색상 분리: 전압(파랑), 전류(주황)
+            uint16_t color = (harmonicsSource == 0) ? COLOR_BLUE : COLOR_ORANGE;
+            
+            tft.fillRect(x_pos, graph_y, bar_w - 4, graph_h, COLOR_BACKGROUND);
+            tft.fillRect(x_pos, curr_y, bar_w - 4, bar_h, color);
+            
+            prev_bar_heights[i] = bar_h;
+        }
+     }
+  } else {
+     // Text View
+     tft.setTextSize(2);
+     tft.setTextColor(COLOR_TEXT_PRIMARY);
+     int col1_x = 10; int start_y = 80; int line_h = 20;
+     
+     for (int i = 1; i <= 7; i++) {
+        if (abs(dataPtr[i] - prev_text_vals[i]) > 0.1) {
+            int y = start_y + (i - 1) * line_h;
+            char buff_pct[10]; dtostrf(dataPtr[i], 5, 1, buff_pct); 
+            
+            // 절대값 표시도 추가 (공간이 되면)
+            float val_abs = (dataPtr[i] / 100.0) * fundamental_rms;
+            char buff_abs[10]; dtostrf(val_abs, 4, 1, buff_abs);
+
+            tft.fillRect(col1_x, y, 300, line_h, COLOR_BACKGROUND);
+            tft.setCursor(col1_x, y);
+            tft.print(i); tft.print(":"); tft.print(buff_pct); tft.print("% / ");
+            tft.print(buff_abs); tft.print((harmonicsSource==0)?"V":"A");
+
+            prev_text_vals[i] = dataPtr[i];
+        }
+     }
   }
 }
 
@@ -530,7 +673,9 @@ void runRelayControl() {
 void runSettingsTheme() {}
 void runPresetScreen() {}
 
+// [Mod] 타이머 값 동적 표시 (간소화된 버전)
 void displaySettingsTimerValues() {
+  // Target Relay Toggle Button (상단 중앙 20, 45, 280, 40 통합됨 in Logic, but here we redraw)
   if (timer_target_relay != prev_timer_target_relay || screenNeedsRedraw) {
      String label = "Target: ";
      if (timer_target_relay == 1) label += "Relay 1";
@@ -540,6 +685,8 @@ void displaySettingsTimerValues() {
      prev_timer_target_relay = timer_target_relay;
   }
 
+  // Time Display (중앙)
+  // 만약 타이머가 Active라면 남은 시간 표시, Idle이라면 설정 시간 표시
   uint32_t display_time = is_timer_active ? timer_seconds_left : temp_timer_setting_seconds;
   static uint32_t prev_display_time = 0xFFFFFFFF;
   static bool prev_active_state = false;
@@ -551,6 +698,7 @@ void displaySettingsTimerValues() {
      
      char buffer[20]; sprintf(buffer, "%02d:%02d:%02d", hours, minutes, seconds);
      
+     // 배경 지우기
      tft.fillRect(60, 95, 200, 40, COLOR_BACKGROUND);
      
      tft.setTextSize(4);
@@ -564,16 +712,26 @@ void displaySettingsTimerValues() {
      prev_active_state = is_timer_active;
   }
 
+  // Step Button (STEP 텍스트 대신 "Step: 10s" 표시)
   if (timer_step_index != prev_timer_step_index || screenNeedsRedraw) {
+     String stepLabel = "Step: " + String(TIMER_STEP_LABELS[timer_step_index]);
+     drawButton(90, 150, 60, 40, stepLabel); // 기존 STEP 버튼 위치 재활용
+     // 하지만 STEP 버튼 폭이 좁으므로(60) 텍스트가 길면 안됨.
+     // 요청: "설정된 스텝 시간을 버튼에만 표시해주고"
+     // 공간 확보를 위해 버튼 폭을 늘리거나 텍스트를 짧게 줄여야 함.
+     // 여기서는 버튼 폭을 조정하지 않고 짧게 표시: "10s"
      drawButton(90, 150, 60, 40, TIMER_STEP_LABELS[timer_step_index]);
      prev_timer_step_index = timer_step_index;
   }
 
+  // START/STOP Action Button
   static bool prev_btn_active = false;
   if (is_timer_active != prev_btn_active || screenNeedsRedraw) {
      String actionLabel = is_timer_active ? "STOP" : "START";
      uint16_t color = is_timer_active ? COLOR_RED : COLOR_GREEN;
      
+     // Custom drawButton with color override logic would be better, 
+     // but here manual draw for custom color
      tft.fillRoundRect(230, 150, 80, 40, 8, color);
      tft.drawRoundRect(230, 150, 80, 40, 8, COLOR_BUTTON_OUTLINE);
      tft.setTextColor(ILI9341_WHITE);

@@ -1,12 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 4. Comm_Input.ino
- * 버전: v212 (Trip Logic & Harmonics Parsing)
+ * 버전: v105 (Grid Touch, Timer Target, Expanded Touch, Harmonics Toggle)
  * 설명: 
- * - [Mod] 트립 화면 터치 시 Relay Control 화면으로 이동 (릴레이 자동 해제 안함)
- * - [Mod] 고조파 데이터 파싱 강화 및 실제 변수 매핑
- * - [Mod] Advanced 설정 화면 3버튼 터치 영역 수정
- * - [Mod] Warning 화면 오작동 방지 로직 추가
+ * - 설정 화면 2열 그리드에 맞는 터치 좌표 수정
+ * - 터치 영역 확대 (+/- 10px padding 적용)
+ * - 고조파 화면 버튼 토글 로직 (소스 변경, RUN/HOLD)
+ * - 타이머 타겟 릴레이 설정 및 리셋 로직 구현
  * ==============================================================================
  */
 
@@ -67,18 +67,17 @@ void checkSerialInput() {
   thd_v_value = rxJsonDoc["THD_V"] | thd_v_value;
   thd_i_value = rxJsonDoc["THD_I"] | thd_i_value;
   
-  // [Mod] 고조파 데이터 파싱 (String -> Array)
   String hv = rxJsonDoc["H_V_STR"];
   String hi = rxJsonDoc["H_I_STR"];
   if (hv.length() > 0) {
-    float temp_h[16]; // 넉넉하게
-    parseCSV(hv, temp_h, 16);
-    for(int k=0; k<=15; k++) v_harmonics[k] = temp_h[k]; 
+    float temp_h[8];
+    parseCSV(hv, temp_h, 8);
+    for(int k=0; k<7; k++) v_harmonics[k+1] = temp_h[k]; 
   }
   if (hi.length() > 0) {
-    float temp_h[16];
-    parseCSV(hi, temp_h, 16);
-    for(int k=0; k<=15; k++) i_harmonics[k] = temp_h[k];
+    float temp_h[8];
+    parseCSV(hi, temp_h, 8);
+    for(int k=0; k<7; k++) i_harmonics[k+1] = temp_h[k];
   }
 
   V_MULTIPLIER = rxJsonDoc["V_MULT"] | V_MULTIPLIER;
@@ -88,22 +87,19 @@ void checkSerialInput() {
 
   relay1_state = rxJsonDoc["R1"]; 
   relay2_state = rxJsonDoc["R2"];
+  is_timer_active = rxJsonDoc["T_ACTIVE"];
+  timer_seconds_left = rxJsonDoc["T_LEFT_S"] | 0;
+  timer_setting_seconds = rxJsonDoc["T_SEC"] | 0;
   
-  // [Mod] Warning Logic 강화
-  // 프로세서로부터 WARN 플래그가 True일 때만 경고 활성화
-  bool mcu1_warning = rxJsonDoc["WARN"];
-  if (mcu1_warning && !warningActive) {
-    warningMessage = rxJsonDoc["MSG"] | "SYSTEM TRIP";
-    tripReason = warningMessage; // 상세 사유 저장
-    trippedRelayInfo = "ALL"; // MCU1 트립은 보통 전체 차단
+  bool newWarning = rxJsonDoc["WARN"];
+  if (newWarning && !warningActive) {
+    warningMessage = rxJsonDoc["MSG"] | "WARNING!";
     warningActive = true;
     screenNeedsRedraw = true; 
-  } else if (!mcu1_warning && warningActive) {
-    // MCU1 경고가 해제되었지만, 타이머 트립일 수 있으므로 구분
-    if (warningMessage != "TIMER FINISHED") {
-        warningActive = false;
-        // 여기서 화면 전환은 하지 않음 (사용자가 확인 후 닫아야 함)
-    }
+  } else if (!newWarning && warningActive) {
+    warningActive = false;
+    currentScreen = SCREEN_HOME;
+    screenNeedsRedraw = true; 
   }
 }
 
@@ -147,7 +143,7 @@ void adjustCalibValue(bool increase) {
   Serial1.println();
 }
 
-// --- Auto Calib 값 조정 ---
+// --- [New] Auto Calib 값 조정 ---
 void adjustAutoCalibValue(bool increase) {
   float step_to_apply = setting_steps[setting_step_index];
   switch (calib_selection) {
@@ -215,13 +211,11 @@ void loadPreset(int slot) {
 
 // --- 터치 입력 확인 ---
 void checkTouchInput() {
-  static bool wasTouched = false; 
   SPI.beginTransaction(spiSettingsTouch);
   bool touched = ts.touched(); 
   SPI.endTransaction();
   
-  if (touched && !wasTouched) { 
-    wasTouched = true; 
+  if (touched) {
     SPI.beginTransaction(spiSettingsTouch);
     TS_Point p = ts.getPoint();
     SPI.endTransaction();
@@ -229,30 +223,30 @@ void checkTouchInput() {
     p.x = map(p.x, TS_RAW_X1, TS_RAW_X2, SCREEN_WIDTH, 0);
     p.y = map(p.y, TS_RAW_Y1, TS_RAW_Y2, SCREEN_HEIGHT, 0);
     
-    // [Mod] 경고 화면 터치 로직 수정
     if (currentScreen == SCREEN_WARNING) { 
-      // 경고 활성 상태만 해제 (릴레이는 제어하지 않음)
-      warningActive = false;
-      sendJsonCommand("{\"CMD\":\"RESET_WARNING\"}"); // MCU1에도 알림 (소리 끄기 등 목적)
-      // 화면은 릴레이 제어 화면으로 이동하여 사용자가 직접 복구하도록 함
-      currentScreen = SCREEN_RELAY_CONTROL;
-      screenNeedsRedraw = true;
-      delay(200); 
+      sendJsonCommand("{\"CMD\":\"RESET_WARNING\"}");
+      delay(100); 
       return; 
     }
 
     if (currentScreen != SCREEN_HOME && currentScreen != SCREEN_WARNING) {
-      if (p.x >= 0 && p.x <= 60 && p.y >= 0 && p.y <= 40) { 
-        
-        if (currentScreen == SCREEN_COMBINED_WAVEFORM) isMainPowerFrozen = false; // Var reuse fix
-        if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO) auto_calib_step = 0; 
+      if (p.x >= 0 && p.x <= 60 && p.y >= 0 && p.y <= 40) { // 터치 영역 확대
+        if (currentScreen == SCREEN_COMBINED_WAVEFORM) {
+          isWaveformFrozen = false; 
+        }
+        if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
+           auto_calib_step = 0; 
+        }
 
         isMainPowerFrozen = false;
         isPhaseFrozen = false;
         isHarmonicsFrozen = false;
         
+        // Back Navigation Logic
         if (currentScreen == SCREEN_SETTINGS_CALIB_MENU || currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
-          if ((currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) && settingsChanged) { 
+          if (currentScreen == SCREEN_SETTINGS_CALIB_MANUAL && settingsChanged) { 
+             previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE;
+          } else if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO && settingsChanged) {
              previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE;
           } else if (currentScreen == SCREEN_SETTINGS_CALIB_MENU) {
              currentScreen = SCREEN_SETTINGS; 
@@ -266,16 +260,14 @@ void checkTouchInput() {
         }
         else if (currentScreen == SCREEN_SETTINGS_THEME || 
                  currentScreen == SCREEN_SETTINGS_RESET || 
-                 currentScreen == SCREEN_SETTINGS_PRESETS || 
-                 currentScreen == SCREEN_SETTINGS_NETWORK || 
                  currentScreen == SCREEN_SETTINGS_TIMER || 
+                 currentScreen == SCREEN_SETTINGS_PRESETS || 
+                 currentScreen == SCREEN_SETTINGS_NETWORK ||
                  currentScreen == SCREEN_CONFIRM_SAVE) {
           if (currentScreen == SCREEN_CONFIRM_SAVE) {
              currentScreen = SCREEN_SETTINGS; 
           } else if (currentScreen == SCREEN_SETTINGS_NETWORK) {
              currentScreen = SCREEN_SETTINGS;
-          } else if (currentScreen == SCREEN_SETTINGS_TIMER) {
-             currentScreen = SCREEN_SETTINGS; 
           } else if (currentScreen == SCREEN_SETTINGS_PRESETS) {
              currentScreen = SCREEN_SETTINGS_ADVANCED;
           } else {
@@ -300,9 +292,10 @@ void checkTouchInput() {
 
     switch (currentScreen) {
       case SCREEN_HOME:
+        // 터치 영역 넉넉하게 (+/- 5~10px)
         if (p.x >= 15 && p.x <= 155 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_MAIN_POWER; screenNeedsRedraw = true; }
         else if (p.x >= 165 && p.x <= 305 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_PHASE_DIFFERENCE; screenNeedsRedraw = true; }
-        else if (p.x >= 15 && p.x <= 155 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_COMBINED_WAVEFORM; screenNeedsRedraw = true; }
+        else if (p.x >= 15 && p.x <= 155 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_COMBINED_WAVEFORM; screenNeedsRedraw = true; sendJsonCommand("{\"CMD\":\"REQ_WAVEFORM\"}"); }
         else if (p.x >= 165 && p.x <= 305 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_HARMONICS; screenNeedsRedraw = true; }
         else if (p.x >= 15 && p.x <= 155 && p.y >= 165 && p.y <= 215) { currentScreen = SCREEN_SETTINGS; screenNeedsRedraw = true; }
         else if (p.x >= 165 && p.x <= 305 && p.y >= 165 && p.y <= 215) { currentScreen = SCREEN_RELAY_CONTROL; screenNeedsRedraw = true; }
@@ -311,46 +304,52 @@ void checkTouchInput() {
       case SCREEN_MAIN_POWER: 
          if (p.x >= 15 && p.x <= 105 && p.y >= 190 && p.y <= 235) {
             isMainPowerFrozen = !isMainPowerFrozen;
-            screenNeedsRedraw = true;
+            String text = isMainPowerFrozen ? "RUN" : "HOLD";
+            drawButton(20, 195, 80, 35, text); delay(200);
          }
          break;
 
       case SCREEN_PHASE_DIFFERENCE:
          if (p.x >= 15 && p.x <= 85 && p.y >= 200 && p.y <= 235) {
             isPhaseFrozen = !isPhaseFrozen;
-            screenNeedsRedraw = true;
+            String text = isPhaseFrozen ? "RUN" : "HOLD";
+            drawButton(20, 205, 60, 25, text); delay(200);
          }
          break;
 
       case SCREEN_HARMONICS: 
-        if (p.x >= 10 && p.x <= 100 && p.y >= 200 && p.y <= 235) { 
+        // [Mod] 고조파 버튼 터치 로직 및 텍스트 업데이트
+        if (p.x >= 5 && p.x <= 105 && p.y >= 195 && p.y <= 240) { 
             harmonicsSource = !harmonicsSource; 
             harmonicsSrcLabel = (harmonicsSource == 0) ? "Src: V" : "Src: I";
-            screenNeedsRedraw = true;
+            screenNeedsRedraw = false; // 전체 리드로잉 대신 버튼만 업데이트 (Dynamic View 처리)
+            delay(200);
         }
-        else if (p.x >= 110 && p.x <= 210 && p.y >= 200 && p.y <= 235) { 
+        else if (p.x >= 110 && p.x <= 215 && p.y >= 195 && p.y <= 240) { 
             isHarmonicsFrozen = !isHarmonicsFrozen; 
-            screenNeedsRedraw = true;
+            // 텍스트 업데이트는 Dynamic View에서 처리
+            delay(200);
+        }
+        else if (p.x >= 220 && p.x <= 315 && p.y >= 195 && p.y <= 240) { 
+            harmonicsViewMode = !harmonicsViewMode; 
+            screenNeedsRedraw = true; 
+            delay(200);
         }
         break;
 
       case SCREEN_SETTINGS:
-        if (p.x >= 20 && p.x <= 300 && p.y >= 50 && p.y <= 90) { 
+        // [Mod] 2열 그리드 배치 터치 좌표
+        // Row 1 (Y: 50~90)
+        if (p.x >= 15 && p.x <= 155 && p.y >= 45 && p.y <= 95) { // CALIB
           temp_V_MULTIPLIER = V_MULTIPLIER; temp_I_MULTIPLIER = I_MULTIPLIER; temp_setting_step_index = setting_step_index; settingsChanged = false; 
           currentScreen = SCREEN_SETTINGS_CALIB_MENU; screenNeedsRedraw = true; 
-        } 
-        else if (p.x >= 20 && p.x <= 150 && p.y >= 100 && p.y <= 140) { 
+        } else if (p.x >= 165 && p.x <= 305 && p.y >= 45 && p.y <= 95) { // PROTECT
           temp_VOLTAGE_THRESHOLD = VOLTAGE_THRESHOLD; temp_setting_step_index = setting_step_index; settingsChanged = false; currentScreen = SCREEN_SETTINGS_PROTECT; screenNeedsRedraw = true;
         } 
-        else if (p.x >= 170 && p.x <= 300 && p.y >= 100 && p.y <= 140) { 
+        // Row 2 (Y: 110~150)
+        else if (p.x >= 15 && p.x <= 155 && p.y >= 105 && p.y <= 155) { // NETWORK
           currentScreen = SCREEN_SETTINGS_NETWORK; screenNeedsRedraw = true;
-        } 
-        else if (p.x >= 20 && p.x <= 150 && p.y >= 150 && p.y <= 190) { 
-            temp_timer_setting_seconds = timer_setting_seconds; 
-            timer_target_relay = (timer_target_relay > 0) ? timer_target_relay : 3; 
-            currentScreen = SCREEN_SETTINGS_TIMER; screenNeedsRedraw = true; 
-        } 
-        else if (p.x >= 170 && p.x <= 300 && p.y >= 150 && p.y <= 190) { 
+        } else if (p.x >= 165 && p.x <= 305 && p.y >= 105 && p.y <= 155) { // ADVANCED
           currentScreen = SCREEN_SETTINGS_ADVANCED; screenNeedsRedraw = true;
         }
         break;
@@ -366,33 +365,24 @@ void checkTouchInput() {
         break;
 
       case SCREEN_SETTINGS_NETWORK: 
-        if (p.x >= 60 && p.x <= 260 && p.y >= 50 && p.y <= 100) {
-           if (wifiState == WIFI_OFF) {
-               wifiState = WIFI_WAIT;
-               lastWifiRetryTime = 0; 
-           } else {
-               wifiState = WIFI_OFF;
-               isWifiConnected = false;
-               sendAT("AT+CWQAP\r\n", 1000, true);
-           }
-           screenNeedsRedraw = true; 
-           delay(300);
-        } 
-        else if (p.y >= 135 && p.y <= 175) {
-           if (p.x >= 20 && p.x <= 80) send_V = !send_V; 
-           else if (p.x >= 90 && p.x <= 150) send_I = !send_I; 
-           else if (p.x >= 160 && p.x <= 220) send_P = !send_P;
-           delay(200); 
+        if (p.x >= 55 && p.x <= 265 && p.y >= 45 && p.y <= 105) {
+          isWifiEnabled = !isWifiEnabled;
+          if (isWifiEnabled) connectWiFi(); else { sendAT("AT+CWQAP\r\n", 1000, true); isWifiConnected = false; }
+          delay(200);
+        } else if (p.y >= 130 && p.y <= 180) {
+           if (p.x >= 15 && p.x <= 85) send_V = !send_V; else if (p.x >= 85 && p.x <= 155) send_I = !send_I; else if (p.x >= 155 && p.x <= 225) send_P = !send_P;
         }
         break;
 
       case SCREEN_SETTINGS_ADVANCED:
-        // [Mod] Advanced Screen 3 Long Buttons Layout
-        if (p.x >= 20 && p.x <= 300 && p.y >= 50 && p.y <= 90) { 
+        // [Mod] 2열 그리드 배치 터치 좌표
+        if (p.x >= 15 && p.x <= 155 && p.y >= 45 && p.y <= 95) { // THEME
             currentScreen = SCREEN_SETTINGS_THEME; screenNeedsRedraw = true; 
-        } else if (p.x >= 20 && p.x <= 300 && p.y >= 100 && p.y <= 140) { 
+        } else if (p.x >= 165 && p.x <= 305 && p.y >= 45 && p.y <= 95) { // TIMER
+            temp_timer_setting_seconds = timer_setting_seconds; currentScreen = SCREEN_SETTINGS_TIMER; screenNeedsRedraw = true; 
+        } else if (p.x >= 15 && p.x <= 155 && p.y >= 105 && p.y <= 155) { // PRESETS
             currentScreen = SCREEN_SETTINGS_PRESETS; screenNeedsRedraw = true; 
-        } else if (p.x >= 20 && p.x <= 300 && p.y >= 150 && p.y <= 190) { 
+        } else if (p.x >= 165 && p.x <= 305 && p.y >= 105 && p.y <= 155) { // RESET
             currentScreen = SCREEN_SETTINGS_RESET; screenNeedsRedraw = true; 
         }
         break;
@@ -407,41 +397,40 @@ void checkTouchInput() {
            else if (p.x >= 165 && p.x <= 305 && p.y >= 165 && p.y <= 215) slot = 3;
            
            if (slot != -1) {
-              if (isPresetSaveMode) { savePreset(slot); screenNeedsRedraw = true; }
-              else { loadPreset(slot); screenNeedsRedraw = true; }
-              delay(300);
+              if (isPresetSaveMode) { savePreset(slot); drawButton(60, 220, 200, 20, "Saved to Slot " + String(slot+1)); }
+              else { loadPreset(slot); drawButton(60, 220, 200, 20, "Loaded Slot " + String(slot+1)); }
+              delay(500);
            }
         }
         break;
 
       case SCREEN_SETTINGS_TIMER:
-        if (p.x >= 60 && p.x <= 260 && p.y >= 45 && p.y <= 85) {
-           timer_target_relay = (timer_target_relay % 3) + 1; 
-           delay(200);
-        }
-        else if (p.y >= 150 && p.y <= 190) {
-           if (p.x >= 20 && p.x <= 80) { 
-              if (temp_timer_setting_seconds >= TIMER_STEP_VALUES[timer_step_index]) temp_timer_setting_seconds -= TIMER_STEP_VALUES[timer_step_index]; 
-              else temp_timer_setting_seconds = 0;
-           } 
-           else if (p.x >= 90 && p.x <= 150) { 
-              timer_step_index = (timer_step_index + 1) % 6; 
-           } 
-           else if (p.x >= 160 && p.x <= 220) { 
-              if (temp_timer_setting_seconds + TIMER_STEP_VALUES[timer_step_index] <= 359999) temp_timer_setting_seconds += TIMER_STEP_VALUES[timer_step_index];
-           }
-           else if (p.x >= 230 && p.x <= 310) { 
-              if (is_timer_active) {
-                 is_timer_active = false;
-                 timer_seconds_left = 0;
-              } else {
-                 is_timer_active = true;
-                 timer_setting_seconds = temp_timer_setting_seconds;
-                 timer_seconds_left = temp_timer_setting_seconds;
-                 lastTimerTick = millis();
-              }
-              delay(200);
-           }
+        // [Mod] 타이머 버튼 로직 수정 (위치 변경 및 Target 설정)
+        
+        // 릴레이 선택 (Target 설정)
+        if (p.x >= 15 && p.x <= 145 && p.y >= 40 && p.y <= 90) { timer_target_relay = 1; delay(100); }
+        else if (p.x >= 155 && p.x <= 285 && p.y >= 40 && p.y <= 90) { timer_target_relay = 2; delay(100); }
+        
+        // 시간 조절 (- / STEP / +) -> Y: 140~180
+        else if (p.x >= 15 && p.x <= 85 && p.y >= 135 && p.y <= 185) { // -
+          if (temp_timer_setting_seconds >= TIMER_STEP_VALUES[timer_step_index]) temp_timer_setting_seconds -= TIMER_STEP_VALUES[timer_step_index]; else temp_timer_setting_seconds = 0;
+        } else if (p.x >= 85 && p.x <= 155 && p.y >= 135 && p.y <= 185) { // STEP
+          timer_step_index = (timer_step_index + 1) % 6; 
+        } else if (p.x >= 155 && p.x <= 225 && p.y >= 135 && p.y <= 185) { // +
+          if (temp_timer_setting_seconds + TIMER_STEP_VALUES[timer_step_index] <= 359999) temp_timer_setting_seconds += TIMER_STEP_VALUES[timer_step_index];
+        } 
+        // START/STOP
+        else if (p.x >= 225 && p.x <= 315 && p.y >= 135 && p.y <= 185) {
+          if (is_timer_active) {
+             // STOP -> 0초 전송 및 OFF
+             sendJsonCommand("{\"CMD\":\"SET_TIMER\", \"SEC\":0, \"TGT\":0}");
+             // 화면 값도 0으로 리셋? -> 요구사항: "OFF하면 다시 00:00:00으로"
+             temp_timer_setting_seconds = 0;
+          } else {
+             // START -> 시간 및 타겟 전송
+             sendJsonCommand("{\"CMD\":\"SET_TIMER\", \"SEC\":" + String(temp_timer_setting_seconds) + ", \"TGT\":" + String(timer_target_relay) + "}");
+          }
+          delay(200);
         }
         break;
 
@@ -491,7 +480,7 @@ void checkTouchInput() {
         break;
 
       case SCREEN_CONFIRM_SAVE:
-        if (p.x >= 15 && p.x <= 155 && p.y >= 95 && p.y <= 145) { 
+        if (p.x >= 15 && p.x <= 155 && p.y >= 95 && p.y <= 145) { // SAVE
           if (previousScreen == SCREEN_SETTINGS_CALIB_MANUAL) { V_MULTIPLIER = temp_V_MULTIPLIER; I_MULTIPLIER = temp_I_MULTIPLIER; } 
           else if (previousScreen == SCREEN_SETTINGS_CALIB_AUTO) { V_MULTIPLIER = temp_V_MULTIPLIER; I_MULTIPLIER = temp_I_MULTIPLIER; }
           else if (previousScreen == SCREEN_SETTINGS_PROTECT) { VOLTAGE_THRESHOLD = temp_VOLTAGE_THRESHOLD; }
@@ -504,7 +493,7 @@ void checkTouchInput() {
           
           settingsChanged = false; currentScreen = SCREEN_SETTINGS; screenNeedsRedraw = true;
         }
-        else if (p.x >= 165 && p.x <= 305 && p.y >= 95 && p.y <= 145) { 
+        else if (p.x >= 165 && p.x <= 305 && p.y >= 95 && p.y <= 145) { // DISCARD
           settingsChanged = false; currentScreen = SCREEN_SETTINGS; screenNeedsRedraw = true;
         }
         break;
@@ -513,9 +502,26 @@ void checkTouchInput() {
         if (p.x >= 15 && p.x <= 305 && p.y >= 65 && p.y <= 115) { isDarkMode = false; setTheme(); screenNeedsRedraw = true; }
         else if (p.x >= 15 && p.x <= 305 && p.y >= 125 && p.y <= 175) { isDarkMode = true; setTheme(); screenNeedsRedraw = true; }
         break;
+
+      case SCREEN_COMBINED_WAVEFORM:
+        if (p.x >= 5 && p.x <= 110 && p.y >= 190 && p.y <= 235) {
+          waveformPlotType = (waveformPlotType + 1) % 3;
+          drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
+          
+          // 범위 초기화는 메인 루프 Auto-ranging에서 처리
+          screenNeedsRedraw = true; 
+        }
+        else if (p.x >= 110 && p.x <= 215 && p.y >= 190 && p.y <= 235) {
+          if (waveformTriggerMode == 2 && isWaveformFrozen) isWaveformFrozen = false; 
+          else { waveformTriggerMode = (waveformTriggerMode + 1) % 3; isWaveformFrozen = false; }
+          drawButton(115, 195, 100, 35, String(WAVEFORM_MODE_LABELS[waveformTriggerMode]));
+        }
+        else if (p.x >= 215 && p.x <= 315 && p.y >= 190 && p.y <= 235) {
+          waveformPeriodIndex = (waveformPeriodIndex + 1) % 3;
+          drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
+        }
+        break;
     }
-  } 
-  else if (!touched) {
-    wasTouched = false; 
+    delay(100); 
   }
 }

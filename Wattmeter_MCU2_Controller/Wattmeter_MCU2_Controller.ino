@@ -1,12 +1,13 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v213 (Compile Fix)
+ * 버전: v205 (Waveform Dual-Y, Harmonics Log-Abs, Simplified Timer, Non-blocking Network)
  * 설명: 
- * - [Fix] Dynamic_View.ino에서 사용하는 prev_harmonicsSrcLabel, prev_harmonicsRunLabel 변수 선언 추가
- * - [Mod] 파형 로직 Wattmeter.ino 원본 스타일(Trigger Mode)로 복원 (MCU2 샘플링)
- * - [Mod] 트립 화면 로직 개선 (사유 표시, 터치 시 릴레이 제어 화면 이동)
- * - [Mod] 고조파 화면 실제 데이터 연동 및 레이아웃 개선
+ * - [Mod] 파형 안정성 개선 및 Y축 양쪽 표시 (좌:Plot1, 우:Plot2)
+ * - [Mod] 고조파: 전압(파랑)/전류(주황) 색상 분리, 로그 스케일 절대값(V/A) 표시
+ * - [Mod] 타이머 UI: 타겟 버튼 통합(Toggle), 시간 표시 통합, Step 텍스트 버튼화
+ * - [Mod] 네트워크: OFF > WAIT > ON 상태 머신, 백그라운드 연결 시도
+ * - [Refactor] MCU 간 통신을 Serial1으로 명확화
  * ==============================================================================
  */
 
@@ -16,8 +17,8 @@
 #include <XPT2046_Touchscreen.h>
 #include <arm_math.h> 
 #include <ArduinoJson.h>
-#include <SoftwareSerial.h> 
-#include <EEPROM.h>         
+#include <SoftwareSerial.h> // ESP-01 통신용 (일반적으로 ESP-01은 9600 사용)
+#include <EEPROM.h>         // 프리셋 저장용
 
 // --- 화면 상태 정의 ---
 enum ScreenState {
@@ -78,6 +79,7 @@ XPT2046_Touchscreen ts(TOUCH_CS);
 SPISettings spiSettingsTFT(40000000, MSBFIRST, SPI_MODE0);
 SPISettings spiSettingsTouch(2000000, MSBFIRST, SPI_MODE0);
 
+// SoftwareSerial 객체
 SoftwareSerial espSerial(ESP_RX_PIN, ESP_TX_PIN); 
 
 // --- JSON 문서 ---
@@ -150,13 +152,14 @@ String wifiSSID = "Mathsaves";
 String wifiPASS = "19886382"; 
 String apiKey = "X50GVA1VU213PQ3Z"; 
 
+// [Mod] 네트워크 상태 관리 (OFF -> WAIT -> ON)
 enum WifiState { WIFI_OFF, WIFI_WAIT, WIFI_CONNECTED_STATE };
 WifiState wifiState = WIFI_OFF;
 unsigned long lastWifiRetryTime = 0;
-const unsigned long WIFI_RETRY_INTERVAL = 10000; 
+const unsigned long WIFI_RETRY_INTERVAL = 10000; // 10초마다 재시도
 
-bool isWifiEnabled = false; 
-bool isWifiConnected = false;   
+bool isWifiEnabled = false; // 구버전 호환용 플래그 (표시용)
+bool isWifiConnected = false; // 실제 연결 여부   
 unsigned long lastSendTime = 0; 
 const unsigned long SEND_INTERVAL = 20000; 
 
@@ -164,14 +167,14 @@ bool send_V = true;
 bool send_I = true;
 bool send_P = true;
 
-// --- 타이머 변수 (MCU2 Local) ---
+// --- 타이머 변수 ---
 bool is_timer_active = false;
 uint32_t timer_seconds_left = 0;
 uint32_t timer_setting_seconds = 0; 
 uint32_t temp_timer_setting_seconds = 0; 
+// [Mod] 타이머 타겟 릴레이 (1 -> 2 -> 3(Both))
 int timer_target_relay = 1; 
 int prev_timer_target_relay = -1;
-unsigned long lastTimerTick = 0;
 
 bool prev_is_timer_active = false;
 uint32_t prev_timer_seconds_left = 0;
@@ -187,38 +190,49 @@ float prev_V_MULTIPLIER = -1.0;
 float prev_I_MULTIPLIER = -1.0;
 bool settingsChanged = false; 
 
-// [Mod] Trip Info
 volatile bool warningActive = false;
 String warningMessage = "";
-String tripReason = ""; // [Mod] 구체적 사유
-String trippedRelayInfo = "ALL"; // [Mod] 트립된 릴레이 정보
 
 #define TS_RAW_X1 370
 #define TS_RAW_Y1 450
 #define TS_RAW_X2 3760
 #define TS_RAW_Y2 3670
 
-// 파형 그래프 위치 (Wattmeter.ino 레퍼런스 적용)
-#define PLOT_X_START 37 
-#define PLOT_X_END 285 
+// 파형 그래프 위치
+#define PLOT_X_START 30 
+#define PLOT_X_END 315 
 #define PLOT_WIDTH (PLOT_X_END - PLOT_X_START)
 #define PLOT_Y_START 50 
-#define PLOT_Y_END 210 
+#define PLOT_Y_END 190 
 #define PLOT_Y_CENTER (PLOT_Y_START + ((PLOT_Y_END - PLOT_Y_START) / 2)) 
 const float PLOT_HEIGHT_HALF = (PLOT_Y_END - PLOT_Y_START) / 2.0; 
 
-// [Mod] Wattmeter.ino Style Buffers
-int last_frame_y_v[PLOT_WIDTH];
-int last_frame_y_i[PLOT_WIDTH];
-#define WAVEFORM_SAMPLE_PERIOD_US 100 // Wattmeter.ino standard
+int last_frame_y_plot1[PLOT_WIDTH]; 
+int last_frame_y_plot2[PLOT_WIDTH]; 
+int last_frame_y_plot3[PLOT_WIDTH]; 
 
-// [Mod] Y-axis ranges (Wattmeter.ino Style)
-const int NUM_V_STEPS = 6;
-const float V_AXIS_STEPS[NUM_V_STEPS] = {50.0, 100.0, 150.0, 250.0, 350.0, 500.0};
-const int NUM_I_STEPS = 7;
-const float I_AXIS_STEPS[NUM_I_STEPS] = {0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0};
-float V_axis_max = V_AXIS_STEPS[4]; // 350V
-float I_axis_max = I_AXIS_STEPS[2]; // 1.0A
+// [Mod] 미리 지정된 범위들 (Stepped Auto-Ranging)
+const int NUM_V_RANGES = 5;
+const float V_RANGES[NUM_V_RANGES] = {50.0, 100.0, 250.0, 350.0, 500.0};
+
+const int NUM_I_RANGES = 5;
+const float I_RANGES[NUM_I_RANGES] = {1.0, 5.0, 10.0, 15.0, 20.0};
+
+const int NUM_P_RANGES = 6;
+const float P_RANGES[NUM_P_RANGES] = {100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0};
+
+float plot1_axis_max = V_RANGES[NUM_V_RANGES-1]; 
+float plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; 
+float plot3_axis_max = I_RANGES[NUM_I_RANGES-1]; 
+
+int waveformPlotType = 0; 
+const char* WAVEFORM_TYPE_LABELS[] = {"V/I", "P/Q", "I/I1/I2"};
+int waveformTriggerMode = 0; 
+const char* WAVEFORM_MODE_LABELS[] = {"Cont.", "Trig.", "Single"};
+volatile bool isWaveformFrozen = false; 
+int waveformPeriodIndex = 1; 
+const char* WAVEFORM_PERIOD_LABELS[] = {"1.0C", "1.5C", "3.0C"};
+const int WAVEFORM_DELAYS_US[] = {50, 100, 200}; 
 
 #define PHASOR_CX 235
 #define PHASOR_CY 115
@@ -247,14 +261,15 @@ float32_t thd_i_value = 0.0;
 float prev_thd_v = 0.0;
 float prev_thd_i = 0.0;
 
-// [Mod] 고조파 데이터 (MCU1에서 수신)
 float v_harmonics[16]; 
 float i_harmonics[16];
 int harmonicsSource = 0;   // 0: Voltage, 1: Current
+int harmonicsViewMode = 0; 
 bool isHarmonicsFrozen = false;
-String harmonicsSrcLabel = "Src: V";
 
-// [Fix] Missing Variables for Optimization
+// [Mod] 고조파 버튼 텍스트 상태 변수
+String harmonicsSrcLabel = "Src: V";
+String harmonicsRunLabel = "RUN";
 String prev_harmonicsSrcLabel = "";
 String prev_harmonicsRunLabel = "";
 
@@ -301,7 +316,7 @@ void displayWarningScreenStatic();
 
 void displayMainScreenValues();
 void displayPhaseScreenValues();
-void runCombinedWaveformLoop(); 
+void runCombinedWaveformLoop();
 void displayHarmonicsScreenValues(); 
 void runSettingsNetwork(); 
 void displaySettingsCalibManualValues();
@@ -311,15 +326,13 @@ void runRelayControl();
 void runSettingsTheme();
 void displaySettingsTimerValues();
 void runPresetScreen(); 
-void waitForVoltageZeroCross(); 
-float findAxisStep(float peak, const float* steps, int num_steps); 
 
 void checkTouchInput();
 void checkSerialInput();
 void measureOffsets();     
 void calculateNewGains(float true_v, float true_i); 
-void sendJsonCommand(String jsonString); 
 
+// AT 커맨드 헬퍼 함수 (Blocking)
 String sendAT(String command, const int timeout, boolean debug) {
   String response = "";
   espSerial.print(command); 
@@ -336,29 +349,35 @@ String sendAT(String command, const int timeout, boolean debug) {
   return response;
 }
 
+// WiFi 연결 함수
 bool connectWiFi() {
   sendAT("AT+CWMODE=1\r\n", 1000, true); 
   String cmd = "AT+CWJAP=\"" + wifiSSID + "\",\"" + wifiPASS + "\"\r\n";
-  String response = sendAT(cmd, 6000, true); 
+  String response = sendAT(cmd, 6000, true); // 타임아웃 약간 증가
   if (response.indexOf("OK") != -1 || response.indexOf("WIFI CONNECTED") != -1) {
     return true;
   }
   return false;
 }
 
+// [Mod] 백그라운드 WiFi 처리
 void handleNetworkLogic() {
   if (wifiState == WIFI_WAIT) {
     if (millis() - lastWifiRetryTime > WIFI_RETRY_INTERVAL) {
       lastWifiRetryTime = millis();
+      // 시도 중임을 알리지 않고 백그라운드 시도 (화면 멈춤 최소화 필요하지만 AT명령 특성상 지연 발생)
       if (connectWiFi()) {
         wifiState = WIFI_CONNECTED_STATE;
         isWifiConnected = true;
         isWifiEnabled = true;
+      } else {
+        // 연결 실패 시 WAIT 유지
       }
     }
   }
 }
 
+// ThingSpeak 전송 함수
 void sendToThingSpeak() {
   Serial.println("Sending to ThingSpeak..."); 
   String cmd = "AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",80\r\n";
@@ -386,12 +405,15 @@ void initDummyHarmonics() {
   }
 }
 
+// ==============================================================================
+// 1. Setup 함수
+// ==============================================================================
 void setup() {
   Serial.begin(115200);  
-  Serial1.begin(115200); 
-  espSerial.begin(9600); 
+  Serial1.begin(115200); // MCU1 통신용
+  espSerial.begin(9600); // ESP-01
 
-  Serial.println("MCU2 Controller (Wattmeter Style Restored) Booting...");
+  Serial.println("MCU2 Controller (Direct ADC & Serial1) Booting...");
   
   analogReadResolution(ADC_RESOLUTION_BITS); 
   pinMode(PIN_ADC_V, INPUT);
@@ -413,10 +435,13 @@ void setup() {
   screenNeedsRedraw = true; 
 }
 
+// ==============================================================================
+// 2. Main Loop
+// ==============================================================================
 void loop() {
   checkTouchInput(); 
   checkSerialInput(); 
-  handleNetworkLogic(); 
+  handleNetworkLogic(); // 백그라운드 네트워크 재시도
 
   if (wifiState == WIFI_CONNECTED_STATE) {
     if (millis() - lastSendTime > SEND_INTERVAL) {
@@ -425,27 +450,6 @@ void loop() {
     }
   }
   
-  // [Mod] 타이머 로직
-  if (is_timer_active) {
-      if (millis() - lastTimerTick >= 1000) {
-          lastTimerTick = millis();
-          if (timer_seconds_left > 0) {
-              timer_seconds_left--;
-          } else {
-              is_timer_active = false;
-              // 타이머 종료 시 릴레이 끄기 요청
-              if (timer_target_relay == 1 || timer_target_relay == 3) sendJsonCommand("{\"CMD\":\"SET_RELAY\", \"ID\":1, \"STATE\":0}");
-              if (timer_target_relay == 2 || timer_target_relay == 3) sendJsonCommand("{\"CMD\":\"SET_RELAY\", \"ID\":2, \"STATE\":0}");
-              
-              warningMessage = "TIMER FINISHED";
-              tripReason = "Timer Limit Reached";
-              trippedRelayInfo = (timer_target_relay == 1) ? "Relay 1" : (timer_target_relay == 2 ? "Relay 2" : "ALL");
-              warningActive = true;
-              screenNeedsRedraw = true;
-          }
-      }
-  }
-
   if (screenNeedsRedraw) { 
     tft.fillScreen(COLOR_BACKGROUND); 
     
@@ -458,13 +462,14 @@ void loop() {
         case SCREEN_MAIN_POWER: displayMainScreenStatic(); break;
         case SCREEN_PHASE_DIFFERENCE: displayPhaseScreenStatic(); break;
         case SCREEN_COMBINED_WAVEFORM:
-          // [Mod] Wattmeter.ino 스타일 복원: 버퍼 초기화 및 그리드
-          drawWaveformGridAndLabels(); 
-          updateYAxisLabels();      
-          for(int i=0; i<PLOT_WIDTH; i++) { 
-              last_frame_y_v[i] = PLOT_Y_CENTER; 
-              last_frame_y_i[i] = PLOT_Y_CENTER; 
-          }
+          isWaveformFrozen = false; waveformTriggerMode = 0; 
+          // [Mod] 초기 범위 설정
+          if (waveformPlotType == 0) { plot1_axis_max = V_RANGES[NUM_V_RANGES-1]; plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; } 
+          else if (waveformPlotType == 1) { plot1_axis_max = P_RANGES[NUM_P_RANGES-1]; plot2_axis_max = P_RANGES[NUM_P_RANGES-1]; } 
+          else { plot1_axis_max = I_RANGES[NUM_I_RANGES-1]; plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; plot3_axis_max = I_RANGES[NUM_I_RANGES-1]; }
+          
+          drawWaveformGridAndLabels(); updateYAxisLabels();      
+          for(int i=0; i<PLOT_WIDTH; i++) { last_frame_y_plot1[i] = PLOT_Y_CENTER; last_frame_y_plot2[i] = PLOT_Y_CENTER; last_frame_y_plot3[i] = PLOT_Y_CENTER; }
           break;
         case SCREEN_HARMONICS: displayHarmonicsScreenStatic(); break;
         case SCREEN_SETTINGS: displaySettingsScreenStatic(); break;
@@ -494,12 +499,7 @@ void loop() {
   switch(currentScreen) {
     case SCREEN_MAIN_POWER: displayMainScreenValues(); break;
     case SCREEN_PHASE_DIFFERENCE: displayPhaseScreenValues(); break;
-    case SCREEN_COMBINED_WAVEFORM: 
-         // [Mod] Wattmeter.ino의 Waveform 로직 사용 (MCU2 샘플링)
-         waitForVoltageZeroCross(); 
-         if (screenNeedsRedraw || warningActive) break; // ZeroCross 대기 중 화면 전환 대응
-         runCombinedWaveformLoop(); 
-         break;
+    case SCREEN_COMBINED_WAVEFORM: runCombinedWaveformLoop(); break;
     case SCREEN_HARMONICS: displayHarmonicsScreenValues(); break;
     case SCREEN_SETTINGS_NETWORK: runSettingsNetwork(); break; 
     case SCREEN_SETTINGS_CALIB_MANUAL: displaySettingsCalibManualValues(); break;
@@ -510,32 +510,6 @@ void loop() {
     case SCREEN_SETTINGS_TIMER: displaySettingsTimerValues(); break;
     case SCREEN_SETTINGS_PRESETS: runPresetScreen(); break; 
     default: break;
-  }
-}
-
-// [Mod] Zero Crossing Detection (Wattmeter.ino ported)
-void waitForVoltageZeroCross() {
-  long startTime = micros();
-  long timeout = 20000; 
-  int V_ac_bits_prev = 0;
-  int V_ac_bits = 0; 
-  
-  while (true) {
-    int V_raw = analogRead(PIN_ADC_V);
-    V_ac_bits = V_raw - (int)ADC_MIDPOINT; 
-    if (V_ac_bits < -50) {
-       V_ac_bits_prev = V_ac_bits;
-       break;
-    }
-    if (micros() - startTime > timeout) return; 
-  }
-
-  while (true) {
-    int V_raw = analogRead(PIN_ADC_V);
-    V_ac_bits = V_raw - (int)ADC_MIDPOINT; 
-    if (V_ac_bits_prev < 0 && V_ac_bits >= 0) return;
-    V_ac_bits_prev = V_ac_bits;
-    if (micros() - startTime > timeout * 2) return; 
   }
 }
 
