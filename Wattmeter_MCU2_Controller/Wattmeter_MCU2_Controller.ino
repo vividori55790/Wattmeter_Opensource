@@ -1,12 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v212 (Timer Logic Refined)
+ * 버전: v215 (WiFi Auto-Connect & Logic Fix)
  * 설명: 
- * - [Mod] Timer End Logic: Explicitly handle Relay 1, 2, or Both and update warning message
- * - [Mod] Waveform Sampling Delays Doubled for better visibility
- * - [Mod] 타이머 카운트 로직을 MCU2 내부 millis() 기반으로 변경
- * - 파형, 고조파, 네트워크 등 기존 기능 유지
+ * - [Mod] WiFi 연결 로직 전면 수정: 상태 머신 기반 (OFF -> WAIT -> ON)
+ * - [Mod] 데이터 전송: 선택 옵션 제거, P(유효전력)값 고정 전송
+ * - [Mod] 백그라운드 전송: 화면 상태와 무관하게 연결 시 주기적 전송
+ * - [Fix] 화면 진입 시 강제 갱신 로직 추가 (resetViewStates 호출)
  * ==============================================================================
  */
 
@@ -16,7 +16,7 @@
 #include <XPT2046_Touchscreen.h>
 #include <arm_math.h> 
 #include <ArduinoJson.h>
-#include <SoftwareSerial.h> // ESP-01 통신용 (일반적으로 ESP-01은 9600 사용)
+#include <SoftwareSerial.h> // ESP-01 통신용
 #include <EEPROM.h>         // 프리셋 저장용
 
 // --- 화면 상태 정의 ---
@@ -151,20 +151,16 @@ String wifiSSID = "Mathsaves";
 String wifiPASS = "19886382"; 
 String apiKey = "X50GVA1VU213PQ3Z"; 
 
-// 네트워크 상태 관리 (OFF -> WAIT -> ON)
+// [Mod] 네트워크 상태 관리 (OFF -> WAIT -> ON)
 enum WifiState { WIFI_OFF, WIFI_WAIT, WIFI_CONNECTED_STATE };
 WifiState wifiState = WIFI_OFF;
 unsigned long lastWifiRetryTime = 0;
-const unsigned long WIFI_RETRY_INTERVAL = 10000; // 10초마다 재시도
+const unsigned long WIFI_RETRY_INTERVAL = 2000; // 재시도 간격 (blocking 완화용)
 
-bool isWifiEnabled = false; // 구버전 호환용 플래그 (표시용)
-bool isWifiConnected = false; // 실제 연결 여부   
+// [Mod] 전송 플래그 변수 삭제됨 (send_V, send_I, send_P) - P값 고정 전송
+
 unsigned long lastSendTime = 0; 
 const unsigned long SEND_INTERVAL = 20000; 
-
-bool send_V = true;
-bool send_I = true;
-bool send_P = true;
 
 // --- 타이머 변수 ---
 bool is_timer_active = false;
@@ -200,9 +196,9 @@ String warningMessage = "";
 #define TS_RAW_X2 3760
 #define TS_RAW_Y2 3670
 
-// 파형 그래프 위치
-#define PLOT_X_START 30 
-#define PLOT_X_END 315 
+// [Mod] 파형 그래프 위치 수정 (Full Width Expansion)
+#define PLOT_X_START 0 
+#define PLOT_X_END 320 
 #define PLOT_WIDTH (PLOT_X_END - PLOT_X_START)
 #define PLOT_Y_START 50 
 #define PLOT_Y_END 190 
@@ -233,8 +229,7 @@ volatile bool isWaveformFrozen = false;
 int waveformPeriodIndex = 1; 
 const char* WAVEFORM_PERIOD_LABELS[] = {"Short", "Mid", "Long"};
 
-// [Mod] 샘플링 간격 조정 (기존 50, 100, 200 -> 2배 증가)
-// 파형을 더 넓게 펼쳐서 보여주기 위함
+// [Mod] 샘플링 간격 조정
 const int WAVEFORM_DELAYS_US[] = {100, 200, 400}; 
 
 #define PHASOR_CX 235
@@ -329,6 +324,7 @@ void runRelayControl();
 void runSettingsTheme();
 void displaySettingsTimerValues();
 void runPresetScreen(); 
+void resetViewStates(); // [New] 상태 초기화 함수
 
 void checkTouchInput();
 void checkSerialInput();
@@ -356,40 +352,41 @@ String sendAT(String command, const int timeout, boolean debug) {
 bool connectWiFi() {
   sendAT("AT+CWMODE=1\r\n", 1000, true); 
   String cmd = "AT+CWJAP=\"" + wifiSSID + "\",\"" + wifiPASS + "\"\r\n";
-  String response = sendAT(cmd, 6000, true); // 타임아웃 약간 증가
+  String response = sendAT(cmd, 6000, true); // 타임아웃 유지 (Blocking이지만 단일 시도)
   if (response.indexOf("OK") != -1 || response.indexOf("WIFI CONNECTED") != -1) {
     return true;
   }
   return false;
 }
 
-// 백그라운드 WiFi 처리
+// [Mod] 백그라운드 WiFi 처리 (상태 머신)
 void handleNetworkLogic() {
+  // 1. WAIT 상태: 주기적으로 연결 시도
   if (wifiState == WIFI_WAIT) {
     if (millis() - lastWifiRetryTime > WIFI_RETRY_INTERVAL) {
+      // 버튼 누른 직후 또는 실패 후 일정 시간 지남
       lastWifiRetryTime = millis();
-      // 시도 중임을 알리지 않고 백그라운드 시도 (화면 멈춤 최소화 필요하지만 AT명령 특성상 지연 발생)
+      
+      // 연결 시도 (Blocking 함수지만 1회 실행 후 루프 복귀)
       if (connectWiFi()) {
         wifiState = WIFI_CONNECTED_STATE;
-        isWifiConnected = true;
-        isWifiEnabled = true;
+        screenNeedsRedraw = true; // 상태 변경 시 화면 갱신 필요
       } else {
-        // 연결 실패 시 WAIT 유지
+        // 실패 시 WAIT 상태 유지, 루프를 돌아 UI 입력(취소) 기회를 줌
       }
     }
   }
 }
 
-// ThingSpeak 전송 함수
+// [Mod] ThingSpeak 전송 함수 (간소화됨)
 void sendToThingSpeak() {
-  Serial.println("Sending to ThingSpeak..."); 
+  Serial.println("Sending P_real to ThingSpeak..."); 
   String cmd = "AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",80\r\n";
   sendAT(cmd, 2000, false);
 
+  // [Fixed] 항상 P_real(유효전력)을 Field1으로 전송
   String getStr = "GET /update?api_key=" + apiKey;
-  if (send_V) getStr += "&field1=" + String(V_rms);
-  if (send_I) getStr += "&field2=" + String(I_rms);
-  if (send_P) getStr += "&field3=" + String(P_real);
+  getStr += "&field1=" + String(P_real);
   getStr += "\r\n\r\n";
 
   cmd = "AT+CIPSEND=";
@@ -444,8 +441,9 @@ void setup() {
 void loop() {
   checkTouchInput(); 
   checkSerialInput(); 
-  handleNetworkLogic(); // 백그라운드 네트워크 재시도
+  handleNetworkLogic(); // [Mod] 백그라운드 네트워크 상태 관리 (WAIT -> ON)
 
+  // [Mod] 화면 상태와 무관하게 연결되어 있다면 항상 전송
   if (wifiState == WIFI_CONNECTED_STATE) {
     if (millis() - lastSendTime > SEND_INTERVAL) {
       sendToThingSpeak();
@@ -453,8 +451,7 @@ void loop() {
     }
   }
   
-  // [Mod] MCU2 내부 타이머 로직 (millis 사용)
-  // 타이머 활성화 상태일 때 MCU2가 직접 카운트 다운 및 종료 처리
+  // [Mod] MCU2 내부 타이머 로직
   if (is_timer_active) {
      if (millis() - last_timer_tick >= 1000) {
         last_timer_tick = millis();
@@ -462,11 +459,10 @@ void loop() {
            timer_seconds_left--;
         }
         
-        // 시간이 0이 되면 트립 수행 (MCU2 주도)
+        // 시간이 0이 되면 트립 수행
         if (timer_seconds_left == 0) {
            is_timer_active = false;
            
-           // [Mod] 타겟 릴레이에 따라 차단 명령 전송 및 메시지 설정
            String tripMsg = "TIMER END";
            
            if (timer_target_relay == 1) {
@@ -484,10 +480,8 @@ void loop() {
            else if (timer_target_relay == 3) { // Both
               relay1_state = false;
               relay2_state = false;
-              // R1 OFF
               txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 1; txJsonDoc["STATE"] = 0;
               serializeJson(txJsonDoc, Serial1); Serial1.println();
-              // R2 OFF
               txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_RELAY"; txJsonDoc["ID"] = 2; txJsonDoc["STATE"] = 0;
               serializeJson(txJsonDoc, Serial1); Serial1.println();
               tripMsg += " (ALL)";
@@ -504,6 +498,9 @@ void loop() {
   if (screenNeedsRedraw) { 
     tft.fillScreen(COLOR_BACKGROUND); 
     
+    // [New] 화면 전환 시 이전 값 상태 초기화하여 강제 갱신 유도
+    resetViewStates();
+
     if (warningActive) {
       currentScreen = SCREEN_WARNING;
       displayWarningScreenStatic(); 
@@ -536,7 +533,6 @@ void loop() {
         case SCREEN_SETTINGS_PRESETS: displayPresetScreenStatic(); break; 
         case SCREEN_SETTINGS_TIMER: 
           displaySettingsTimerStatic(); 
-          // [Mod] 타이머 화면 진입 시 플래그 초기화 (버튼 가시성 보장)
           prev_is_timer_active = !is_timer_active; 
           prev_timer_seconds_left = -1; 
           prev_temp_timer_setting_seconds = 0xFFFFFFFF; prev_timer_step_index = -1; 

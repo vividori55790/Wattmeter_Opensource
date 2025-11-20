@@ -1,11 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: Wattmeter_MCU1_Processor.ino
- * 버전: v208 (Timer Logic Removed, Controlled by MCU2)
+ * 버전: v209 (Auto-Clear Warning Added)
  * 설명: 
  * - 전압/전류 센서 RMS, 전력(P,Q,S), 역률, 위상차 계산.
  * - [Mod] 타이머 로직 제거 (MCU2 컨트롤러가 시간 관리 및 트리거 담당)
- * - 릴레이 제어 및 파형 스트리밍 기능 유지
+ * - [Mod] 정상 전압 복귀 시 warningActive 플래그 자동 해제 로직 추가
  * ==============================================================================
  */
 
@@ -132,8 +132,6 @@ void setup() {
 
 void loop() {
   checkSerialCommand(); // Reads from Serial1 (MCU2)
-
-  // [Mod] 타이머 로직 제거됨 (MCU2가 제어)
   
   if (isWaveformStreaming) {
     runWaveformStreaming();
@@ -194,7 +192,6 @@ void checkSerialCommand() {
          digitalWrite(RELAY_2_PIN, relay2_state ? HIGH : LOW);
          sendMainData(); 
       }
-      // [Mod] SET_TIMER 명령 제거됨 (MCU2 내부 처리)
       else if (cmd == "RESET_WARNING") {
          warningActive = false;
          // 릴레이 상태 복구
@@ -308,8 +305,7 @@ void sendMainData() {
   
   txJsonDoc["R1"] = relay1_state;
   txJsonDoc["R2"] = relay2_state;
-  // [Mod] 타이머 상태는 MCU2가 관리하므로 MCU1은 단순히 0 전송 또는 생략 가능
-  // 호환성을 위해 유지하되 더미 값 전송
+  
   txJsonDoc["T_ACTIVE"] = false; 
   txJsonDoc["T_LEFT_S"] = 0;
   txJsonDoc["T_SEC"] = 0;
@@ -417,12 +413,22 @@ void calculatePowerMetrics() {
   else if (phase_main_deg > 2.0) lead_lag_status = "Lag";
   else lead_lag_status = "---";
 
+  // [Mod] 과전압 감지 로직 개선
   if (V_rms > VOLTAGE_THRESHOLD) {
+    // 과전압 발생 시 동작
     digitalWrite(RELAY_1_PIN, HIGH);
     digitalWrite(RELAY_2_PIN, HIGH); 
     relay1_state = true; relay2_state = true;
     warningMessage = "OVER VOLTAGE!"; 
     warningActive = true;
+  } else {
+    // [Mod] 정상 전압으로 복귀 시 경고 신호 자동 해제
+    // MCU1은 더 이상 WARN 신호를 보내지 않게 되며, 
+    // MCU2는 화면 터치 전까지 마지막 경고 화면을 유지합니다 (Latch).
+    if (warningActive) {
+       warningActive = false;
+       warningMessage = "";
+    }
   }
 }
 

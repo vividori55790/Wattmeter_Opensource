@@ -1,16 +1,38 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v210 (Clean Cont. Mode with Immediate Refresh)
+ * 버전: v216 (Phasor Redraw Fix)
  * 설명: 
- * - [Mod] Cont. Mode: Replaced Rolling Logic with Immediate Frame Capture (Like Trig mode w/o wait)
- * - [Mod] Drawing: Added explicit line clearing using previous frame buffer to prevent flicker
- * - [Fix] Harmonics & Timer logic retained
+ * - [Mod] 네트워크 설정 화면 UI 단순화
+ * - [Mod] 화면 진입 시 강제 갱신을 위한 이전 값(prev_) 변수 전역화 및 초기화(resetViewStates)
+ * - [Mod] 고조파 그래프 그리드 지우개 현상 수정 (길이 비교 및 부분 갱신)
+ * - [Fix] 페이서 작도 화면 진입 시 그래프가 그려지지 않는 문제 수정 (좌표 리셋 추가)
  * ==============================================================================
  */
 
 // 외부 전역 변수 참조 (Controller에서 정의됨)
 extern bool prev_is_timer_active; 
+
+// [New] 전역으로 승격된 이전 값 저장 변수들 (화면 전환 시 초기화를 위함)
+// 메인 전력 화면
+float prev_disp_V_rms = -1.0;
+float prev_disp_I_rms = -1.0;
+float prev_disp_P_real = -1.0;
+float prev_disp_PF = -1.0;
+float prev_disp_Q_reactive = -1.0;
+float prev_disp_I_rms_load1 = -1.0;
+float prev_disp_I_rms_load2 = -1.0;
+float prev_disp_S_apparent = -1.0;
+float prev_disp_thd_v_main = -1.0;
+float prev_disp_thd_i_main = -1.0;
+
+// 타이머 화면
+uint32_t prev_timer_display_time = 0xFFFFFFFF;
+bool prev_timer_active_state = false;
+
+// 고조파 그래프 이전 높이
+static int prev_bar_heights[16]; 
+static float prev_text_vals[16];  
 
 // --- 헬퍼: 값 출력 (Float) ---
 void printTFTValue(int x, int y, float value, float prev_value, int precision, uint16_t color, String unit) {
@@ -55,36 +77,102 @@ void printTFTValue(int x, int y, String value, String prev_value, uint16_t color
   tft.print(value);
 }
 
+// [New] 화면 상태 초기화 함수 (화면 진입 시 호출)
+void resetViewStates() {
+    // 메인 화면 변수 초기화
+    prev_disp_V_rms = -1.0;
+    prev_disp_I_rms = -1.0;
+    prev_disp_P_real = -1.0;
+    prev_disp_PF = -1.0;
+    prev_disp_Q_reactive = -1.0;
+    prev_disp_I_rms_load1 = -1.0;
+    prev_disp_I_rms_load2 = -1.0;
+    prev_disp_S_apparent = -1.0;
+    prev_disp_thd_v_main = -1.0;
+    prev_disp_thd_i_main = -1.0;
+
+    // 페이서 화면 텍스트 변수 초기화
+    prev_phase_degrees = -999.0;
+    prev_lead_lag_status = "";
+    prev_phase_main_deg = -999.0;
+    prev_phase_load1_deg = -999.0;
+    prev_phase_load2_deg = -999.0;
+    
+    // [Fix] 페이서 작도(선) 좌표 초기화 (강제 갱신 유도)
+    prev_v_x = -1; prev_v_y = -1;
+    prev_im_x = -1; prev_im_y = -1;
+    prev_i1_x = -1; prev_i1_y = -1;
+    prev_i2_x = -1; prev_i2_y = -1;
+    
+    // 고조파 관련 초기화
+    for(int i=0; i<16; i++) {
+        prev_bar_heights[i] = -1;
+        prev_text_vals[i] = -1.0;
+    }
+    prev_harmonicsSrcLabel = "";
+    prev_harmonicsRunLabel = "";
+
+    // 타이머 화면 초기화
+    prev_timer_display_time = 0xFFFFFFFF;
+    prev_timer_active_state = false;
+    prev_timer_step_index = -1;
+    prev_timer_target_relay = -1;
+
+    // 설정 화면 초기화
+    prev_calib_selection = -1;
+    prev_V_MULTIPLIER = -1.0;
+    prev_I_MULTIPLIER = -1.0;
+    prev_setting_step_index = -1;
+    prev_protect_selection = -1;
+    prev_VOLTAGE_THRESHOLD = -1.0;
+    
+    // 릴레이 컨트롤 초기화
+    prev_r1_state = !relay1_state; // 강제 불일치 유도
+    prev_r2_state = !relay2_state;
+}
+
 // --- [Mod] 네트워크 설정 화면 동적 갱신 ---
 void runSettingsNetwork() {
   if (screenNeedsRedraw) {
+    // 테두리는 유지하되, 데이터 선택 버튼 영역은 더 이상 그리지 않음
     tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
   }
 
   static WifiState prev_wifiState = (WifiState)-1;
+  static unsigned long lastBlinkTime = 0;
+  static bool blinkState = true;
   
+  bool blinkNeeded = (wifiState == WIFI_WAIT);
+  if (blinkNeeded) {
+     if (millis() - lastBlinkTime > 500) {
+         lastBlinkTime = millis();
+         blinkState = !blinkState;
+         prev_wifiState = (WifiState)-1; // 강제 갱신 트리거
+     }
+  }
+
   if (wifiState != prev_wifiState || screenNeedsRedraw) {
     String statusMsg = "";
-    String btnText = "";
     uint16_t statusColor = COLOR_BUTTON;
+    uint16_t textColor = COLOR_BUTTON_TEXT;
 
     if (wifiState == WIFI_CONNECTED_STATE) {
-       statusMsg = "WiFi: ON (Connected)";
+       statusMsg = "WiFi: ON";
        statusColor = COLOR_GREEN;
-       btnText = "TURN OFF";
+       textColor = ILI9341_BLACK;
     } else if (wifiState == WIFI_WAIT) {
-       statusMsg = "WiFi: WAIT...";
-       statusColor = COLOR_ORANGE;
-       btnText = "WAITING...";
+       statusMsg = "Connecting...";
+       statusColor = blinkState ? COLOR_ORANGE : COLOR_BACKGROUND;
+       textColor = blinkState ? ILI9341_BLACK : COLOR_TEXT_PRIMARY;
     } else {
        statusMsg = "WiFi: OFF";
-       statusColor = COLOR_BUTTON; 
-       btnText = "TURN ON";
+       statusColor = COLOR_BUTTON; // 회색 or 테마색
+       textColor = COLOR_BUTTON_TEXT;
     }
 
     tft.fillRoundRect(60, 50, 200, 50, 10, statusColor);
     tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
-    tft.setTextColor((wifiState==WIFI_CONNECTED_STATE)?ILI9341_BLACK:COLOR_BUTTON_TEXT); 
+    tft.setTextColor(textColor); 
     tft.setTextSize(2);
     int16_t x1, y1; uint16_t w, h;
     tft.getTextBounds(statusMsg, 0, 0, &x1, &y1, &w, &h);
@@ -92,23 +180,6 @@ void runSettingsNetwork() {
     tft.print(statusMsg);
     
     prev_wifiState = wifiState;
-  }
-
-  static bool prev_send_V = !send_V;
-  static bool prev_send_I = !send_I;
-  static bool prev_send_P = !send_P;
-
-  if (send_V != prev_send_V || screenNeedsRedraw) {
-     drawButton(20, 135, 60, 40, send_V ? "[V]" : " V ");
-     prev_send_V = send_V;
-  }
-  if (send_I != prev_send_I || screenNeedsRedraw) {
-     drawButton(90, 135, 60, 40, send_I ? "[I]" : " I ");
-     prev_send_I = send_I;
-  }
-  if (send_P != prev_send_P || screenNeedsRedraw) {
-     drawButton(160, 135, 60, 40, send_P ? "[P]" : " P ");
-     prev_send_P = send_P;
   }
 }
 
@@ -123,21 +194,12 @@ void displayMainScreenValues() {
   int col_w_half = 90; 
   int col_w_half_wide = 100;
   
-  static float prev_V_rms = -1.0;
-  static float prev_I_rms = -1.0;
-  static float prev_P_real = -1.0;
-  static float prev_PF = -1.0;
-  static float prev_Q_reactive = -1.0;
-  static float prev_I_rms_load1 = -1.0;
-  static float prev_I_rms_load2 = -1.0;
-  static float prev_S_apparent = -1.0;
-  static float prev_thd_v_main = -1.0; 
-  static float prev_thd_i_main = -1.0;
+  // [Mod] static 제거 후 전역 변수 사용
 
-  printTFTValue(col1_value_x, 40, V_rms, prev_V_rms, 1, COLOR_BLUE, " V");
-  prev_V_rms = V_rms;
+  printTFTValue(col1_value_x, 40, V_rms, prev_disp_V_rms, 1, COLOR_BLUE, " V");
+  prev_disp_V_rms = V_rms;
   
-  if (abs(I_rms - prev_I_rms) > 0.001) {
+  if (abs(I_rms - prev_disp_I_rms) > 0.001) {
       tft.fillRect(col1_value_x, 65, col_w_half, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 65);
@@ -146,10 +208,10 @@ void displayMainScreenValues() {
       } else { 
         dtostrf(I_rms, 4, 2, buffer); tft.print(buffer); tft.print(" A");
       }
-      prev_I_rms = I_rms;
+      prev_disp_I_rms = I_rms;
   }
   
-  if (abs(P_real - prev_P_real) > 0.1) {
+  if (abs(P_real - prev_disp_P_real) > 0.1) {
       tft.fillRect(col1_value_x, 90, col_w_half, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_DARKGREEN);
       tft.setCursor(col1_value_x, 90);
@@ -158,13 +220,13 @@ void displayMainScreenValues() {
       } else { 
         dtostrf(P_real, 4, 1, buffer); tft.print(buffer); tft.print(" W");
       }
-      prev_P_real = P_real;
+      prev_disp_P_real = P_real;
   }
 
-  printTFTValue(col2_value_x, 115, PF, prev_PF, 2, COLOR_MAGENTA, "");
-  prev_PF = PF;
+  printTFTValue(col2_value_x, 115, PF, prev_disp_PF, 2, COLOR_MAGENTA, "");
+  prev_disp_PF = PF;
   
-  if (abs(Q_reactive - prev_Q_reactive) > 0.1) {
+  if (abs(Q_reactive - prev_disp_Q_reactive) > 0.1) {
       tft.fillRect(col1_value_x, 115, col_w_half, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 115);
@@ -173,10 +235,10 @@ void displayMainScreenValues() {
       } else { 
         dtostrf(Q_reactive, 4, 1, buffer); tft.print(buffer); tft.print(" VAR");
       }
-      prev_Q_reactive = Q_reactive;
+      prev_disp_Q_reactive = Q_reactive;
   }
 
-  if (abs(I_rms_load1 - prev_I_rms_load1) > 0.001) {
+  if (abs(I_rms_load1 - prev_disp_I_rms_load1) > 0.001) {
       tft.fillRect(col2_value_x, 40, col_w_half_wide, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_RED);
       tft.setCursor(col2_value_x, 40); 
@@ -185,10 +247,10 @@ void displayMainScreenValues() {
       } else { 
         dtostrf(I_rms_load1, 4, 2, buffer); tft.print(buffer); tft.print(" A");
       }
-      prev_I_rms_load1 = I_rms_load1;
+      prev_disp_I_rms_load1 = I_rms_load1;
   }
 
-  if (abs(I_rms_load2 - prev_I_rms_load2) > 0.001) {
+  if (abs(I_rms_load2 - prev_disp_I_rms_load2) > 0.001) {
       tft.fillRect(col2_value_x, 65, col_w_half_wide, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_GREEN);
       tft.setCursor(col2_value_x, 65); 
@@ -197,10 +259,10 @@ void displayMainScreenValues() {
       } else { 
         dtostrf(I_rms_load2, 4, 2, buffer); tft.print(buffer); tft.print(" A");
       }
-      prev_I_rms_load2 = I_rms_load2;
+      prev_disp_I_rms_load2 = I_rms_load2;
   }
 
-  if (abs(S_apparent - prev_S_apparent) > 0.1) {
+  if (abs(S_apparent - prev_disp_S_apparent) > 0.1) {
       tft.fillRect(col2_value_x, 90, col_w_half_wide, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_TEXT_PRIMARY);
       tft.setCursor(col2_value_x, 90); 
@@ -209,13 +271,13 @@ void displayMainScreenValues() {
       } else { 
         dtostrf(S_apparent, 4, 1, buffer); tft.print(buffer); tft.print(" VA");
       }
-      prev_S_apparent = S_apparent;
+      prev_disp_S_apparent = S_apparent;
   }
 
-  printTFTValue(col2_value_x, 140, thd_v_value * 100.0, prev_thd_v_main * 100.0, 1, COLOR_BLUE, " %");
-  prev_thd_v_main = thd_v_value;
-  printTFTValue(col2_value_x, 165, thd_i_value * 100.0, prev_thd_i_main * 100.0, 1, COLOR_ORANGE, " %");
-  prev_thd_i_main = thd_i_value;
+  printTFTValue(col2_value_x, 140, thd_v_value, prev_disp_thd_v_main, 1, COLOR_BLUE, " %");
+  prev_disp_thd_v_main = thd_v_value;
+  printTFTValue(col2_value_x, 165, thd_i_value, prev_disp_thd_i_main, 1, COLOR_ORANGE, " %");
+  prev_disp_thd_i_main = thd_i_value;
 }
 
 // --- 위상차 화면 값 업데이트 ---
@@ -280,52 +342,55 @@ void displayPhaseScreenValues() {
   }
 }
 
-// --- [Mod] Waveform Axis & Units Update ---
+// --- [Mod] Y-Axis Label Update: Internal Top-Left & Color Matched ---
 void updateYAxisLabels() {
+  // 기존 라벨 영역 지우기
+  tft.fillRect(PLOT_X_START + 1, PLOT_Y_START + 1, 200, 20, COLOR_BACKGROUND);
+
   tft.setTextSize(1);
   char buffer[10]; 
-  
-  tft.fillRect(PLOT_X_END + 1, PLOT_Y_START, SCREEN_WIDTH - PLOT_X_END - 1, 20, COLOR_BACKGROUND); 
-  tft.fillRect(PLOT_X_END + 1, PLOT_Y_END - 10, SCREEN_WIDTH - PLOT_X_END - 1, 10, COLOR_BACKGROUND); 
-  tft.fillRect(0, PLOT_Y_START, PLOT_X_START - 1, 20, COLOR_BACKGROUND); 
-  tft.fillRect(0, PLOT_Y_END - 10, PLOT_X_START - 1, 10, COLOR_BACKGROUND); 
+  int x_pos = PLOT_X_START + 5;
+  int y_pos = PLOT_Y_START + 5;
 
-  tft.setTextColor(COLOR_BLUE);
-  dtostrf(plot1_axis_max, 3, 0, buffer);
-  
-  String unit1 = "V";
-  if (waveformPlotType == 1) unit1 = "W";       
-  else if (waveformPlotType == 2) unit1 = "A";  
-  
-  tft.setCursor(0, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print(unit1); 
-  tft.setCursor(0, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print(unit1);
-    
+  // Type 2 (I/I1/I2): 단일 통합 라벨, 검정색
   if (waveformPlotType == 2) {
-    tft.setTextColor(COLOR_ORANGE);
-    dtostrf(plot2_axis_max, 3, 0, buffer); 
-    tft.setCursor(PLOT_X_END + 2, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("A");
-    tft.setCursor(PLOT_X_END + 2, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("A");
+    tft.setTextColor(ILI9341_BLACK); // Inst 4: Black Color
+    dtostrf(plot1_axis_max, 3, 0, buffer); 
+    tft.setCursor(x_pos, y_pos);
+    tft.print("+"); tft.print(buffer); tft.print("A");
   } 
+  // Type 0 (V/I) & Type 1 (P/Q)
   else {
+    // Label 1 (V or P) -> Blue
+    tft.setTextColor(COLOR_BLUE);
+    dtostrf(plot1_axis_max, 3, 0, buffer);
+    String unit1 = (waveformPlotType == 1) ? "W" : "V";
+    tft.setCursor(x_pos, y_pos);
+    tft.print("+"); tft.print(buffer); tft.print(unit1); 
+    
+    // Spacing
+    x_pos += 60; 
+
+    // Label 2 (I or Q) -> Orange
     tft.setTextColor(COLOR_ORANGE);
-    String unit2 = "A";
-    if (waveformPlotType == 1) unit2 = "Vr"; 
+    String unit2 = (waveformPlotType == 1) ? "VAR" : "A";
     
     if (plot2_axis_max < 1.0) { 
-      dtostrf(plot2_axis_max * 1000, 3, 0, buffer);
-      tft.setCursor(PLOT_X_END + 2, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print("m"); tft.print(unit2);
-      tft.setCursor(PLOT_X_END + 2, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print("m"); tft.print(unit2);
+       dtostrf(plot2_axis_max * 1000, 3, 0, buffer);
+       tft.setCursor(x_pos, y_pos);
+       tft.print("+"); tft.print(buffer); tft.print("m"); tft.print(unit2);
     } else { 
-      dtostrf(plot2_axis_max, 3, 0, buffer);
-      tft.setCursor(PLOT_X_END + 2, PLOT_Y_START + 5); tft.print("+"); tft.print(buffer); tft.print(unit2);
-      tft.setCursor(PLOT_X_END + 2, PLOT_Y_END - 10); tft.print("-"); tft.print(buffer); tft.print(unit2);
+       dtostrf(plot2_axis_max, 3, 0, buffer);
+       tft.setCursor(x_pos, y_pos);
+       tft.print("+"); tft.print(buffer); tft.print(unit2);
     }
   }
 }
 
 // --- [Fix] Harmonics Y-Axis Update Logic ---
 void updateHarmonicsYAxisLabels() {
-   tft.fillRect(0, 45, 39, 150, COLOR_BACKGROUND);
+   // [Mod] Clear larger area for safety, including graph
+   tft.fillRect(0, 45, 320, 150, COLOR_BACKGROUND);
    displayHarmonicsScreenStatic();
 }
 
@@ -343,7 +408,6 @@ void runCombinedWaveformLoop() {
   float eff_V_off = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
   float eff_I_off = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
   
-  // [Mod] 변경된 딜레이 값 적용 (MCU2_Controller에서 수정됨)
   int delay_us = WAVEFORM_DELAYS_US[waveformPeriodIndex];
   int center = ADC_MIDPOINT;
   
@@ -352,16 +416,10 @@ void runCombinedWaveformLoop() {
   // ============================================================
   // 1. 샘플링 (Sampling) 영역
   // ============================================================
-  
-  // [Mod] Cont. Mode (연속 모드) 로직 전면 재작성
-  // - 기존 롤링 방식 제거 -> Trig 모드와 동일한 "전체 프레임 캡처" 방식 적용
-  // - 제로 크로싱 대기 없이 즉시 루프 시작
-  if (waveformTriggerMode == 0) {
-      // Q 계산을 위한 Lag Buffer 채우기 (Trig 모드 로직 차용)
+  if (waveformTriggerMode == 0) { // Cont. Mode
       float local_lag_buf[LAG_SIZE];
       int lag_head = 0;
 
-      // 버퍼 초기화 (Type 1: P/Q 모드일 때 필요)
       if (waveformPlotType == 1) {
           for(int k=0; k<LAG_SIZE; k++) {
               int r_v = analogRead(PIN_ADC_V);
@@ -372,7 +430,6 @@ void runCombinedWaveformLoop() {
           }
       }
 
-      // 전체 프레임 즉시 샘플링
       for (int i = 0; i < PLOT_WIDTH; i++) {
           unsigned long t0 = micros();
           
@@ -408,7 +465,6 @@ void runCombinedWaveformLoop() {
              p3_buf[i] = cur2;
           }
           
-          // 사용자 입력 및 통신 체크 (응답성 유지)
           checkSerialInput();
           checkTouchInput();
           if (screenNeedsRedraw) return;
@@ -416,13 +472,11 @@ void runCombinedWaveformLoop() {
           while (micros() - t0 < delay_us);
       }
   } 
-  // [Keep] Trig. / Single Mode (기존 로직 유지 - 제로 크로싱 대기 포함)
-  else {
+  else { // Trig. / Single Mode
       unsigned long trigger_start = millis();
       int hyst = 50;
       int trig_state = 0;
       
-      // 제로 크로싱 대기 (Timeout 50ms)
       while (millis() - trigger_start < 50) {
          checkTouchInput();
          if (screenNeedsRedraw) return;
@@ -431,7 +485,6 @@ void runCombinedWaveformLoop() {
          else if (trig_state == 1) { if (raw_v > (center + hyst)) { triggered = true; break; } }
       }
 
-      // Lag Buffer Pre-fill
       float local_lag_buf[LAG_SIZE];
       int lag_head = 0;
       for(int k=0; k<LAG_SIZE; k++) {
@@ -442,7 +495,6 @@ void runCombinedWaveformLoop() {
           delayMicroseconds(delay_us);
       }
       
-      // 프레임 샘플링
       for (int i = 0; i < PLOT_WIDTH; i++) {
         unsigned long t0 = micros();
         int r_v = analogRead(PIN_ADC_V);
@@ -480,15 +532,14 @@ void runCombinedWaveformLoop() {
   }
   
   // ============================================================
-  // 2. 오토 레인징 (Auto-ranging) - 기존 유지
+  // 2. 오토 레인징 (Auto-ranging)
   // ============================================================
-  float max_val_p1 = 0.0, max_val_p2 = 0.0;
+  float max_val_p1 = 0.0, max_val_p2 = 0.0, max_val_p3 = 0.0;
   for(int i=0; i<PLOT_WIDTH; i++) {
      if (abs(v_buf[i]) > max_val_p1) max_val_p1 = abs(v_buf[i]);
      if (abs(p2_buf[i]) > max_val_p2) max_val_p2 = abs(p2_buf[i]);
-     if (waveformPlotType == 2 && abs(p3_buf[i]) > max_val_p1) max_val_p1 = abs(p3_buf[i]);
+     if (waveformPlotType == 2 && abs(p3_buf[i]) > max_val_p3) max_val_p3 = abs(p3_buf[i]);
   }
-  if (waveformPlotType == 2) max_val_p2 = max_val_p1;
 
   static int range_idx_v = NUM_V_RANGES - 1;
   static int range_idx_i = NUM_I_RANGES - 1;
@@ -501,24 +552,29 @@ void runCombinedWaveformLoop() {
           while (idx < count - 1 && peak > ranges[idx]) idx++;
           changed = true;
       } else if (idx > 0) {
-          if (peak < (ranges[idx-1] * 0.8)) { idx--; changed = true; }
+          if (peak < (ranges[idx-1] * 0.6)) { idx--; changed = true; }
       }
       return changed;
   };
 
-  if (waveformPlotType == 0) { 
+  if (waveformPlotType == 0) { // V/I
      if (updateRange(range_idx_v, max_val_p1, V_RANGES, NUM_V_RANGES)) rangeChanged = true;
      if (updateRange(range_idx_i, max_val_p2, I_RANGES, NUM_I_RANGES)) rangeChanged = true;
-     plot1_axis_max = V_RANGES[range_idx_v]; plot2_axis_max = I_RANGES[range_idx_i];
+     plot1_axis_max = V_RANGES[range_idx_v]; 
+     plot2_axis_max = I_RANGES[range_idx_i];
   } 
-  else if (waveformPlotType == 1) { 
+  else if (waveformPlotType == 1) { // P/Q
      float max_pq = max(max_val_p1, max_val_p2);
      if (updateRange(range_idx_p, max_pq, P_RANGES, NUM_P_RANGES)) rangeChanged = true;
-     plot1_axis_max = P_RANGES[range_idx_p]; plot2_axis_max = P_RANGES[range_idx_p];
+     plot1_axis_max = P_RANGES[range_idx_p]; 
+     plot2_axis_max = P_RANGES[range_idx_p];
   } 
-  else { 
-     if (updateRange(range_idx_i, max_val_p1, I_RANGES, NUM_I_RANGES)) rangeChanged = true;
-     plot1_axis_max = I_RANGES[range_idx_i]; plot2_axis_max = I_RANGES[range_idx_i]; plot3_axis_max = I_RANGES[range_idx_i];
+  else { // I/I1/I2
+     float global_max = max(max_val_p1, max(max_val_p2, max_val_p3));
+     if (updateRange(range_idx_i, global_max, I_RANGES, NUM_I_RANGES)) rangeChanged = true;
+     plot1_axis_max = I_RANGES[range_idx_i]; 
+     plot2_axis_max = I_RANGES[range_idx_i]; 
+     plot3_axis_max = I_RANGES[range_idx_i];
   }
 
   if (rangeChanged) {
@@ -527,15 +583,12 @@ void runCombinedWaveformLoop() {
   }
   
   // ============================================================
-  // 3. 그리기 (Drawing) - Clearing 로직 강화
+  // 3. 그리기 (Drawing)
   // ============================================================
   float scale1 = (plot1_axis_max == 0) ? 0 : (PLOT_HEIGHT_HALF / plot1_axis_max);
   float scale2 = (plot2_axis_max == 0) ? 0 : (PLOT_HEIGHT_HALF / plot2_axis_max);
   float scale3 = (plot3_axis_max == 0) ? 0 : (PLOT_HEIGHT_HALF / plot3_axis_max); 
 
-  // [Mod] 이전 프레임의 Y좌표 추적을 위한 지역 변수
-  // last_frame_y_plot 배열은 루프 돌면서 즉시 갱신되므로, 
-  // 지우기(Clearing) 단계에서 필요한 '이전 X점의 Y값'을 보존해야 함.
   int py1_old = PLOT_Y_CENTER, py2_old = PLOT_Y_CENTER, py3_old = PLOT_Y_CENTER; 
   int py1_new = PLOT_Y_CENTER, py2_new = PLOT_Y_CENTER, py3_new = PLOT_Y_CENTER;
 
@@ -543,23 +596,19 @@ void runCombinedWaveformLoop() {
   for (int i = 0; i < PLOT_WIDTH; i++) {
      int x = PLOT_X_START + i;
      
-     // 현재 프레임의 이전 값 (지우기 용) -> 루프 시작 시점에 배열에서 읽어야 함
      int cy1_old = last_frame_y_plot1[i];
      int cy2_old = last_frame_y_plot2[i];
      int cy3_old = last_frame_y_plot3[i];
 
-     // 새로운 Y값 계산
      int y1 = constrain(PLOT_Y_CENTER - (int)(v_buf[i] * scale1), PLOT_Y_START, PLOT_Y_END);
      int y2 = constrain(PLOT_Y_CENTER - (int)(p2_buf[i] * scale2), PLOT_Y_START, PLOT_Y_END);
      int y3 = PLOT_Y_CENTER;
      if (waveformPlotType == 2) y3 = constrain(PLOT_Y_CENTER - (int)(p3_buf[i] * scale3), PLOT_Y_START, PLOT_Y_END);
 
-     // 그리기 (첫 점 제외)
      if (i > 0) {
          int xp = x - 1;
          
-         // [Clear] 이전 선 지우기 (이전 프레임의 선)
-         // 이전 점(xp, py_old) -> 현재 점(x, cy_old)
+         // [Clear] 이전 선 지우기
          if (cy1_old != PLOT_Y_CENTER || py1_old != PLOT_Y_CENTER)
             tft.drawLine(xp, py1_old, x, cy1_old, COLOR_BACKGROUND);
          if (cy2_old != PLOT_Y_CENTER || py2_old != PLOT_Y_CENTER)
@@ -570,18 +619,15 @@ void runCombinedWaveformLoop() {
          }
 
          // [Draw] 새로운 선 그리기
-         // 이전 점(xp, py_new) -> 현재 점(x, y)
          tft.drawLine(xp, py1_new, x, y1, COLOR_BLUE);
          tft.drawLine(xp, py2_new, x, y2, COLOR_ORANGE);
          if (waveformPlotType == 2) tft.drawLine(xp, py3_new, x, y3, COLOR_RED);
      }
      
-     // 배열 갱신 (다음 프레임을 위해 현재 값 저장)
      last_frame_y_plot1[i] = y1; 
      last_frame_y_plot2[i] = y2; 
      last_frame_y_plot3[i] = y3;
 
-     // 다음 루프를 위해 현재 값을 '이전 값' 변수에 저장
      py1_old = cy1_old; py2_old = cy2_old; py3_old = cy3_old;
      py1_new = y1;      py2_new = y2;      py3_new = y3;
   }
@@ -593,15 +639,14 @@ void runCombinedWaveformLoop() {
   checkSerialInput(); 
 }
 
-// [Mod] HARMONICS 화면 값 업데이트 (로그 스케일 절대값, 색상 분리, 그리드 갱신)
+// HARMONICS 화면 업데이트
 void displayHarmonicsScreenValues() {
-  // 소스 변경 시 Y축 라벨을 명시적으로 지우고 다시 그림
   if (harmonicsSrcLabel != prev_harmonicsSrcLabel) {
      drawButton(10, 200, 90, 35, harmonicsSrcLabel);
      prev_harmonicsSrcLabel = harmonicsSrcLabel;
-     
-     // [Fix] Y축 라벨 잔상 제거를 위해 갱신 함수 호출
-     updateHarmonicsYAxisLabels();
+     updateHarmonicsYAxisLabels(); 
+     // 소스 변경 시 전체 다시 그리기 위해 초기화
+     for(int i=0; i<16; i++) prev_bar_heights[i] = -1;
   }
   
   String currRunLabel = isHarmonicsFrozen ? "RUN" : "HOLD";
@@ -615,12 +660,12 @@ void displayHarmonicsScreenValues() {
   float* dataPtr = (harmonicsSource == 0) ? v_harmonics : i_harmonics;
   float fundamental_rms = (harmonicsSource == 0) ? V_rms : I_rms;
   
-  static int prev_bar_heights[16]; 
-  static float prev_text_vals[8];  
-
   if (harmonicsViewMode == 0) {
-     int graph_x = 40; int graph_y = 45; int graph_h = 145;
-     int bar_w = 270 / 8; 
+     int graph_x = 55;
+     int graph_y = 50; 
+     int graph_h = 130;
+     int graph_w = 255;
+     int bar_w = graph_w / 8;
      float min_log = (harmonicsSource == 0) ? 0.0 : -2.0; 
      float max_log = (harmonicsSource == 0) ? 3.0 : 1.0;
      float log_range = max_log - min_log;
@@ -636,20 +681,60 @@ void displayHarmonicsScreenValues() {
             if (normalized > 1.0) normalized = 1.0;
             if (normalized < 0.0) normalized = 0.0; 
             bar_h = (int)(normalized * graph_h);
-        } else bar_h = 1; 
+        } else bar_h = 1;
+
+        int x_pos = graph_x + (i - 1) * bar_w + 2;
+        uint16_t color = (harmonicsSource == 0) ? COLOR_BLUE : COLOR_ORANGE;
         
-        if (bar_h != prev_bar_heights[i]) {
-            int x_pos = graph_x + (i - 1) * bar_w + 2;
-            int curr_y = graph_y + graph_h - bar_h;
-            uint16_t color = (harmonicsSource == 0) ? COLOR_BLUE : COLOR_ORANGE;
-            tft.fillRect(x_pos, graph_y, bar_w - 4, graph_h, COLOR_BACKGROUND); 
-            tft.fillRect(x_pos, curr_y, bar_w - 4, bar_h, color);
-            prev_bar_heights[i] = bar_h;
+        int prev_h = prev_bar_heights[i];
+        int curr_h = bar_h;
+
+        // [Mod] 이전 막대 길이와 비교하여 부분 갱신 (지우개 현상 방지)
+        if (curr_h != prev_h) {
+            if (curr_h > prev_h) {
+                // 1. 막대가 길어진 경우: 윗부분만 추가로 그리기
+                // 좌표계: y값은 아래로 갈수록 증가. 바닥 = graph_y + graph_h
+                // 이전 Top (prev_y) = graph_y + graph_h - prev_h
+                // 현재 Top (curr_y) = graph_y + graph_h - curr_h (더 작음, 즉 더 위쪽)
+                int curr_y = graph_y + graph_h - curr_h;
+                // 그릴 높이: curr_h - prev_h
+                tft.fillRect(x_pos, curr_y, bar_w - 4, curr_h - prev_h, color);
+            } else {
+                // 2. 막대가 짧아진 경우: 줄어든 부분만 지우고 그리드 복구
+                int prev_y = graph_y + graph_h - prev_h; // 지워야 할 영역의 Top
+                int curr_y = graph_y + graph_h - curr_h; // 지워야 할 영역의 Bottom (새 막대 Top)
+                
+                // 지우기
+                tft.fillRect(x_pos, prev_y, bar_w - 4, prev_h - curr_h, COLOR_BACKGROUND);
+                
+                // 해당 영역에 그리드 선이 있으면 다시 그리기
+                for (int j = 0; j <= 3; j++) {
+                    int line_y = graph_y + (j * (graph_h / 3));
+                    if (j == 3) line_y = graph_y + graph_h;
+                    
+                    // 선이 지워진 영역 [prev_y, curr_y] 사이에 있는지 확인
+                    // 주의: prev_y가 더 작음(위쪽)
+                    if (line_y >= prev_y && line_y <= curr_y) {
+                        tft.drawFastHLine(x_pos, line_y, bar_w - 4, COLOR_GRID);
+                    }
+                }
+                // 새 막대 상단 보정 (혹시 모를 픽셀 오차 방지용, 필요한 경우)
+                // tft.fillRect(x_pos, curr_y, bar_w - 4, 1, color); 
+            }
+            prev_bar_heights[i] = curr_h;
+        }
+        // 초기 상태(-1)에서 바로 그리는 경우 처리
+        else if (prev_h == -1) {
+             int curr_y = graph_y + graph_h - curr_h;
+             tft.fillRect(x_pos, curr_y, bar_w - 4, curr_h, color);
+             prev_bar_heights[i] = curr_h;
         }
      }
   } else {
+     // [Mod] Text Mode: Unified list for 8 odd harmonics
      tft.setTextSize(2); tft.setTextColor(COLOR_TEXT_PRIMARY);
-     int col1_x = 20; int col2_x = 175; int start_y = 90; int line_h = 25;
+     int col1_x = 20; int col2_x = 175; 
+     int start_y = 85; int line_h = 25;
      
      for (int i = 1; i <= 8; i++) {
          if (abs(dataPtr[i] - prev_text_vals[i]) > 0.05 || screenNeedsRedraw) {
@@ -658,9 +743,11 @@ void displayHarmonicsScreenValues() {
              int y = start_y + (row_idx * line_h);
              
              float val_abs = (dataPtr[i] / 100.0) * fundamental_rms;
+             
              char buff_pct[8]; 
              if (dataPtr[i] >= 100.0) dtostrf(dataPtr[i], 3, 0, buff_pct); 
              else dtostrf(dataPtr[i], 4, 1, buff_pct); 
+             
              char buff_abs[8];
              if (val_abs >= 10.0) dtostrf(val_abs, 4, 0, buff_abs);
              else if (val_abs >= 1.0) dtostrf(val_abs, 4, 1, buff_abs);
@@ -668,12 +755,17 @@ void displayHarmonicsScreenValues() {
 
              tft.fillRect(col_x, y, 140, line_h, COLOR_BACKGROUND);
              tft.setCursor(col_x, y);
+             
+             // [Mod] Correct Labeling (1, 3, 5... 15)
              int harmonic_order = (i==1) ? 1 : (2*i - 1);
              tft.print(harmonic_order); tft.print(":");
+             
              tft.setTextColor((harmonicsSource==0)?COLOR_BLUE:COLOR_ORANGE);
              tft.print(buff_abs); tft.print((harmonicsSource==0)?"V":"A");
+             
              tft.setTextColor(COLOR_TEXT_SECONDARY); tft.setTextSize(1);
              tft.print("("); tft.print(buff_pct); tft.print("%)");
+             
              tft.setTextSize(2); tft.setTextColor(COLOR_TEXT_PRIMARY);
              prev_text_vals[i] = dataPtr[i];
          }
@@ -753,7 +845,6 @@ void runRelayControl() {
 void runSettingsTheme() {}
 void runPresetScreen() {}
 
-// [Mod] 타이머 값 동적 표시 (버튼 가시성 수정됨)
 void displaySettingsTimerValues() {
   if (timer_target_relay != prev_timer_target_relay || screenNeedsRedraw) {
      String label = "Target: ";
@@ -765,10 +856,11 @@ void displaySettingsTimerValues() {
   }
 
   uint32_t display_time = is_timer_active ? timer_seconds_left : temp_timer_setting_seconds;
-  static uint32_t prev_display_time = 0xFFFFFFFF;
-  static bool prev_active_state = false;
+  // [Mod] 전역 변수 사용
+  static uint32_t prev_display_time = 0xFFFFFFFF; // 함수 내 static은 제거하거나 초기값용으로 유지하되 아래 로직은 전역 변수 사용 권장
+  // 여기서는 resetViewStates에서 초기화되는 prev_timer_display_time 사용
 
-  if (display_time != prev_display_time || is_timer_active != prev_active_state || screenNeedsRedraw) {
+  if (display_time != prev_timer_display_time || is_timer_active != prev_timer_active_state || screenNeedsRedraw) {
      uint16_t hours = display_time / 3600;
      uint16_t minutes = (display_time % 3600) / 60;
      uint8_t seconds = display_time % 60;
@@ -781,8 +873,8 @@ void displaySettingsTimerValues() {
      tft.getTextBounds(buffer, 0, 0, &x1, &y1, &w, &h);
      tft.setCursor((SCREEN_WIDTH - w)/2, 95 + 5); 
      tft.print(buffer);
-     prev_display_time = display_time;
-     prev_active_state = is_timer_active;
+     prev_timer_display_time = display_time;
+     prev_timer_active_state = is_timer_active;
   }
 
   if (timer_step_index != prev_timer_step_index || screenNeedsRedraw) {
@@ -790,16 +882,10 @@ void displaySettingsTimerValues() {
      prev_timer_step_index = timer_step_index;
   }
 
-  // [Fix] Start/Stop 버튼이 처음 화면에 진입했을 때 그려지지 않는 문제 수정
-  // - 기존에는 함수 내부의 static 변수(prev_btn_active)가 false로 초기화되어 있어, 
-  //   is_timer_active도 false일 경우 상태 변화가 감지되지 않아 버튼이 그려지지 않았음.
-  // - Controller의 Static View에서 초기화해주는 전역 변수 'prev_is_timer_active'를 사용하여
-  //   화면 진입 시 강제로 상태 불일치를 유발, 버튼이 무조건 그려지도록 수정함.
   if (is_timer_active != prev_is_timer_active || screenNeedsRedraw) {
      String actionLabel = is_timer_active ? "STOP" : "START";
      uint16_t color = is_timer_active ? COLOR_RED : COLOR_GREEN;
      
-     // 버튼 영역 좌표: 230, 150, 80, 40 (다른 버튼과 겹치지 않음)
      tft.fillRoundRect(230, 150, 80, 40, 8, color);
      tft.drawRoundRect(230, 150, 80, 40, 8, COLOR_BUTTON_OUTLINE);
      tft.setTextColor(ILI9341_WHITE);
@@ -807,7 +893,6 @@ void displaySettingsTimerValues() {
      tft.setCursor(240, 162); 
      tft.print(actionLabel);
      
-     // 상태 동기화
      prev_is_timer_active = is_timer_active;
   }
 }

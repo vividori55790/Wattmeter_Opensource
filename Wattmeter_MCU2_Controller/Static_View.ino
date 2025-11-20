@@ -1,12 +1,11 @@
 /*
  * ==============================================================================
  * 파일명: 2. Static_View.ino
- * 버전: v211 (Harmonics UI Layout Optimized)
+ * 버전: v214 (Harmonics UI Improved)
  * 설명: 
- * - [Mod] Harmonics Graph: Height reduced (145->135), Centered Vertically (Y: 45->48)
- * - [Mod] Settings 화면: Calibration(Top), 2x2 Grid (Protect, Network, Timer, Advanced)
- * - [Fix] Confirm Save 화면: DISCARD(Left), SAVE(Right)로 배치 수정
- * - [Fix] Theme 화면: 텍스트와 로직의 일치 (Light=Light, Dark=Dark)
+ * - [Mod] Harmonics Screen: 그래프 영역 최적화 및 Y축 단위 즉시 반영 구조
+ * - [Mod] X축 라벨: 1, 3, 5 ... 15 홀수 차수 표시
+ * - [Mod] Legend Color Fix 유지
  * ==============================================================================
  */
 
@@ -167,7 +166,7 @@ void displayPhaseScreenStatic() {
   drawButton(20, 205, 60, 25, btnText);
 }
 
-// [Mod] Harmonics UI Layout Optimized
+// --- [Mod] Improved Harmonics Static Display ---
 void displayHarmonicsScreenStatic() {
   tft.setCursor(65, 10); 
   tft.setTextColor(COLOR_TEXT_PRIMARY); 
@@ -180,48 +179,53 @@ void displayHarmonicsScreenStatic() {
   drawButton(220, 200, 90, 35, "View"); 
 
   if (harmonicsViewMode == 0) {
-     // [Mod] Graph Layout adjusted
-     // graph_y: 45 -> 48 (Center vertically)
-     // graph_h: 145 -> 135 (Reduced height by 10px for spacing)
-     int graph_x = 40; int graph_y = 48; int graph_w = 270; int graph_h = 135; 
+     // [Mod] Adjusted Graph Area for Better Y-Axis Label Visibility
+     int graph_x = 55;  // Left margin increased for Y-axis labels
+     int graph_y = 50;  
+     int graph_w = 255; 
+     int graph_h = 130; // Height adjusted to avoid overlapping buttons
      
      tft.drawRect(graph_x, graph_y, graph_w, graph_h, COLOR_GRID);
      
      tft.setTextSize(1); tft.setTextColor(COLOR_TEXT_SECONDARY);
      
-     // Draw Grid Lines (3 divisions)
+     // Draw Grid Lines (3 equal divisions for Log scale)
      for (int i=0; i<=3; i++) {
          int line_y = graph_y + (i * (graph_h / 3));
+         // Ensure last line is exactly at bottom
+         if (i == 3) line_y = graph_y + graph_h;
+         
          tft.drawFastHLine(graph_x, line_y, graph_w, COLOR_GRID);
          
-         if (harmonicsSource == 0) { 
-             if(i==0) { tft.setCursor(5, line_y-3); tft.print("1kV"); }
-             else if(i==1) { tft.setCursor(5, line_y-3); tft.print("100V"); }
-             else if(i==2) { tft.setCursor(5, line_y-3); tft.print("10V"); }
-             else if(i==3) { tft.setCursor(5, line_y-3); tft.print("1V"); }
-         } else { 
-             if(i==0) { tft.setCursor(5, line_y-3); tft.print("10A"); }
-             else if(i==1) { tft.setCursor(5, line_y-3); tft.print("1A"); }
-             else if(i==2) { tft.setCursor(5, line_y-3); tft.print("0.1A"); }
-             else if(i==3) { tft.setCursor(2, line_y-3); tft.print(".01A"); }
+         // Y-Axis Labels based on Source
+         if (harmonicsSource == 0) { // Voltage
+             if(i==0) { tft.setCursor(15, line_y-3); tft.print("1000V"); }
+             else if(i==1) { tft.setCursor(20, line_y-3); tft.print("100V"); }
+             else if(i==2) { tft.setCursor(25, line_y-3); tft.print("10V"); }
+             else if(i==3) { tft.setCursor(30, line_y-3); tft.print("1V"); }
+         } else { // Current
+             if(i==0) { tft.setCursor(25, line_y-3); tft.print("10A"); }
+             else if(i==1) { tft.setCursor(30, line_y-3); tft.print("1A"); }
+             else if(i==2) { tft.setCursor(25, line_y-3); tft.print(".1A"); }
+             else if(i==3) { tft.setCursor(20, line_y-3); tft.print(".01A"); }
          }
      }
      
+     // [Mod] X-Axis Labels (Odd Harmonics: 1, 3, 5 ... 15)
      int bar_w = graph_w / 8; 
      for(int i=1; i<=8; i++) { 
         int x_pos = graph_x + (i-1)*bar_w + bar_w/2 - 3; 
-        tft.setCursor(x_pos, graph_y + graph_h + 2); 
-        if (i==1) tft.print("F"); 
-        else tft.print(2*i - 1); 
+        tft.setCursor(x_pos, graph_y + graph_h + 5); 
+        
+        // Display 1, 3, 5 ... 15
+        int harmonic_order = (i == 1) ? 1 : (2 * i - 1);
+        tft.print(harmonic_order); 
      }
   } else { 
+     // Text Mode Layout
      tft.setTextSize(2); tft.setTextColor(COLOR_TEXT_PRIMARY);
-     tft.fillRoundRect(10, 50, 145, 30, 5, COLOR_GRID);
-     tft.fillRoundRect(165, 50, 145, 30, 5, COLOR_GRID);
-     
-     tft.setTextColor(ILI9341_BLACK);
-     tft.setCursor(20, 57); tft.print("1st - 7th"); 
-     tft.setCursor(175, 57); tft.print("9th - 15th");
+     tft.setCursor(30, 55); tft.print("Odd Harmonics (1-15)");
+     tft.drawFastHLine(30, 75, 260, COLOR_GRID);
   }
 }
 
@@ -249,7 +253,7 @@ void displaySettingsNetworkStatic() {
   tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
   tft.setCursor(20, 115);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.print("Data to Send (ThingSpeak):");
+  tft.print("Send to Thingspeak");
 }
 
 void displaySettingsCalibMenuStatic() {
@@ -356,8 +360,8 @@ void displaySettingsThemeStatic() {
   tft.println("THEME SETTINGS");
   drawBackButton();
   
-  drawButton(20, 70, 280, 40, "LIGHT THEME");
-  drawButton(20, 130, 280, 40, "DARK THEME");
+  drawButton(20, 70, 280, 40, "DARK THEME");
+  drawButton(20, 130, 280, 40, "LIGHT THEME");
   
   tft.setTextColor(COLOR_RED);
   tft.setTextSize(2);
@@ -478,26 +482,22 @@ void drawWaveformGridAndLabels() {
   tft.println("WAVEFORM (60Hz)");
   drawBackButton(); 
   
+  // [Mod] 그리드 그리기: PLOT_X_START(0) ~ PLOT_X_END(320) 전체 영역 사용
   tft.drawRect(PLOT_X_START, PLOT_Y_START, PLOT_WIDTH, (PLOT_Y_END - PLOT_Y_START), COLOR_GRID); 
   tft.drawFastHLine(PLOT_X_START, PLOT_Y_CENTER, PLOT_WIDTH, COLOR_GRID); 
   tft.drawFastVLine(PLOT_X_START, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), COLOR_TEXT_SECONDARY); 
-  tft.drawFastVLine(PLOT_X_END, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), COLOR_TEXT_SECONDARY); 
+  // 오른쪽 끝 라인 (화면 밖으로 나가지 않도록 -1)
+  tft.drawFastVLine(PLOT_X_END - 1, PLOT_Y_START, (PLOT_Y_END - PLOT_Y_START), COLOR_TEXT_SECONDARY); 
 
-  tft.setTextSize(1);
-  tft.setTextColor(COLOR_TEXT_SECONDARY);
-  tft.setCursor(PLOT_X_END + 5, PLOT_Y_CENTER - 4); 
-  tft.print("0"); 
-  tft.setCursor(0, PLOT_Y_CENTER - 4); 
-  tft.print("0"); 
-  
   drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
   drawButton(115, 195, 100, 35, WAVEFORM_MODE_LABELS[waveformTriggerMode]); 
   drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
 
+  // [Mod] Type 2 (Current Mode) Legend Colors Matched
   if (waveformPlotType == 2) {
      tft.setTextSize(1);
      tft.setCursor(200, 35); tft.setTextColor(COLOR_BLUE); tft.print("I ");
-     tft.setCursor(220, 35); tft.setTextColor(COLOR_RED); tft.print("I1 ");
-     tft.setCursor(245, 35); tft.setTextColor(COLOR_GREEN); tft.print("I2");
+     tft.setCursor(220, 35); tft.setTextColor(COLOR_ORANGE); tft.print("I1 ");
+     tft.setCursor(245, 35); tft.setTextColor(COLOR_RED); tft.print("I2");
   }
 }
