@@ -6,6 +6,7 @@
  * - [Mod] Harmonics Screen: 그래프 영역 최적화 및 Y축 단위 즉시 반영 구조
  * - [Mod] X축 라벨: 1, 3, 5 ... 15 홀수 차수 표시
  * - [Mod] Legend Color Fix 유지
+ * - [Mod] Settings UI 변경 (5버튼 배열) 및 Advanced UI 변경 (2x2 그리드)
  * ==============================================================================
  */
 
@@ -134,7 +135,7 @@ void displayPhaseScreenStatic() {
   
   tft.setTextSize(2);
   tft.setCursor(10, 50); tft.setTextColor(COLOR_MAGENTA); tft.println("PF:"); 
-  tft.setCursor(10, 75); tft.setTextColor(COLOR_TEXT_PRIMARY); tft.println("Status:"); 
+  tft.setCursor(10, 75); tft.setTextColor(COLOR_TEXT_PRIMARY); tft.println("Status(I_M):"); 
   
   tft.setTextSize(1);
   tft.setCursor(10, 125); tft.setTextColor(COLOR_TEXT_PRIMARY); tft.print("--- Phase (deg) ---"); 
@@ -237,11 +238,66 @@ void displaySettingsScreenStatic() {
   displayNetworkStatus(); 
   drawBackButton();
   
+  // 1행 (Mod: Full Width)
   drawButton(20, 50, 280, 40, "CALIBRATION");
+  
+  // 2행
   drawButton(20, 110, 130, 40, "PROTECTION");
   drawButton(170, 110, 130, 40, "NETWORK"); 
+  
+  // 3행
   drawButton(20, 170, 130, 40, "TIMER");
   drawButton(170, 170, 130, 40, "ADVANCED");
+}
+
+// --- [New] Credit Screen & Sub Screens ---
+void displaySettingsCreditStatic() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setTextSize(2);
+  tft.println("CREDIT");
+  displayNetworkStatus();
+  drawBackButton();
+  
+  drawButton(20, 50, 280, 40, "MEMBER 1");
+  drawButton(20, 110, 280, 40, "MEMBER 2");
+  drawButton(20, 170, 280, 40, "MEMBER 3");
+}
+
+void displayCreditMember1Static() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setTextSize(2);
+  tft.println("MEMBER 1");
+  drawBackButton();
+  
+  tft.setCursor(60, 100); 
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.print("Information for Member 1");
+}
+
+void displayCreditMember2Static() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setTextSize(2);
+  tft.println("MEMBER 2");
+  drawBackButton();
+  
+  tft.setCursor(60, 100); 
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.print("Information for Member 2");
+}
+
+void displayCreditMember3Static() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setTextSize(2);
+  tft.println("MEMBER 3");
+  drawBackButton();
+  
+  tft.setCursor(60, 100); 
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.print("Information for Member 3");
 }
 
 void displaySettingsNetworkStatic() {
@@ -399,9 +455,13 @@ void displaySettingsAdvancedStatic() {
   tft.println("ADVANCED SETTINGS");
   drawBackButton();
   
-  drawButton(20, 50, 280, 40, "THEME");
-  drawButton(20, 110, 280, 40, "PRESETS");
-  drawButton(20, 170, 280, 40, "RESET");
+  // 1행
+  drawButton(20, 50, 130, 40, "THEME");
+  drawButton(170, 50, 130, 40, "PRESETS");
+  
+  // 2행
+  drawButton(20, 110, 130, 40, "RESET");
+  drawButton(170, 110, 130, 40, "CREDIT");
 }
 
 void displayPresetScreenStatic() {

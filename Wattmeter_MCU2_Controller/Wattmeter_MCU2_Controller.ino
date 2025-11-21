@@ -8,6 +8,8 @@
  * - [Mod] 백그라운드 전송: 화면 상태와 무관하게 연결 시 주기적 전송
  * - [Fix] 화면 진입 시 강제 갱신 로직 추가 (resetViewStates 호출)
  * - [New] 비상 화면 복구 기능: 10초 이상 터치 시 디스플레이 리셋
+ * - [Mod] CREDIT 및 멤버 정보 화면 상태 추가 및 루프 처리
+ * - [Mod] 릴레이 화면 진입 시 즉시 데이터 요청(REQ_DATA) 추가
  * ==============================================================================
  */
 
@@ -40,7 +42,11 @@ enum ScreenState {
   SCREEN_SETTINGS_PRESETS, 
   SCREEN_SETTINGS_TIMER,    
   SCREEN_CONFIRM_SAVE,      
-  SCREEN_WARNING
+  SCREEN_WARNING,
+  SCREEN_SETTINGS_CREDIT,
+  SCREEN_CREDIT_MEMBER_1,
+  SCREEN_CREDIT_MEMBER_2,
+  SCREEN_CREDIT_MEMBER_3
 };
 volatile ScreenState currentScreen = SCREEN_HOME; 
 volatile ScreenState previousScreen = SCREEN_HOME; 
@@ -305,6 +311,10 @@ void displaySettingsCalibManualStatic();
 void displayAutoCalibStatic();           
 void displaySettingsProtectStatic();
 void displayRelayControlStatic();
+void displaySettingsCreditStatic();
+void displayCreditMember1Static();
+void displayCreditMember2Static();
+void displayCreditMember3Static();
 void displaySettingsThemeStatic();
 void displaySettingsResetStatic();
 void displaySettingsAdvancedStatic();
@@ -556,7 +566,10 @@ void loop() {
         case SCREEN_SETTINGS_CALIB_MANUAL: displaySettingsCalibManualStatic(); prev_V_MULTIPLIER = -1.0; prev_I_MULTIPLIER = -1.0; prev_setting_step_index = -1; break;
         case SCREEN_SETTINGS_CALIB_AUTO: displayAutoCalibStatic(); break; 
         case SCREEN_SETTINGS_PROTECT: displaySettingsProtectStatic(); prev_VOLTAGE_THRESHOLD = -1.0; prev_setting_step_index = -1; break;
-        case SCREEN_RELAY_CONTROL: displayRelayControlStatic(); break;
+        case SCREEN_RELAY_CONTROL: 
+          displayRelayControlStatic(); 
+          Serial1.println("{\"CMD\":\"REQ_DATA\"}"); 
+          break;
         case SCREEN_SETTINGS_THEME: displaySettingsThemeStatic(); break;
         case SCREEN_SETTINGS_RESET: displaySettingsResetStatic(); break;
         case SCREEN_SETTINGS_ADVANCED: displaySettingsAdvancedStatic(); break;
@@ -570,6 +583,10 @@ void loop() {
           break;
         case SCREEN_CONFIRM_SAVE: displayConfirmSaveStatic(); break;
         case SCREEN_WARNING: break;
+        case SCREEN_SETTINGS_CREDIT: displaySettingsCreditStatic(); break;
+        case SCREEN_CREDIT_MEMBER_1: displayCreditMember1Static(); break;
+        case SCREEN_CREDIT_MEMBER_2: displayCreditMember2Static(); break;
+        case SCREEN_CREDIT_MEMBER_3: displayCreditMember3Static(); break;
       }
     }
     screenNeedsRedraw = false; 

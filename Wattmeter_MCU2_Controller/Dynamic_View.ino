@@ -7,6 +7,7 @@
  * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
  * - [Fix] 화면 갱신: 화면 진입 시(screenNeedsRedraw) 값이 같아도 강제 출력
  * - [Mod] 고조파 소스 변경 시 텍스트 리스트 강제 갱신 로직 추가
+ * - [Mod] 페이서 다이어그램: 전체 삭제 -> 그리드 복구 -> 길이순(긴->짧은) 정렬 그리기 적용
  * ==============================================================================
  */
 
@@ -323,37 +324,60 @@ void displayPhaseScreenValues() {
   int i2_x = PHASOR_CX + (int)(i2_len * cos(phase_load2_deg * (M_PI / 180.0)));
   int i2_y = PHASOR_CY - (int)(i2_len * sin(phase_load2_deg * (M_PI / 180.0)));
 
-  // [New] 그리드 복구용 람다 함수 (지우개 현상 방지)
-  auto redrawPhasorGrid = [&]() {
+  // ================================================================================
+  // [New] Improved Drawing Logic: Erase All -> Redraw Grid -> Sort & Draw Lines
+  // ================================================================================
+  
+  // 1. Check for changes
+  bool needsUpdate = screenNeedsRedraw || 
+                     (v_x != prev_v_x || v_y != prev_v_y) ||
+                     (im_x != prev_im_x || im_y != prev_im_y) ||
+                     (i1_x != prev_i1_x || i1_y != prev_i1_y) ||
+                     (i2_x != prev_i2_x || i2_y != prev_i2_y);
+
+  if (needsUpdate) {
+      // 2. Erase all existing lines (using previous coordinates)
+      if (prev_v_x != -1) tft.drawLine(PHASOR_CX, PHASOR_CY, prev_v_x, prev_v_y, COLOR_BACKGROUND);
+      if (prev_im_x != -1) tft.drawLine(PHASOR_CX, PHASOR_CY, prev_im_x, prev_im_y, COLOR_BACKGROUND);
+      if (prev_i1_x != -1) tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i1_x, prev_i1_y, COLOR_BACKGROUND);
+      if (prev_i2_x != -1) tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i2_x, prev_i2_y, COLOR_BACKGROUND);
+
+      // 3. Restore Grid (Circles & Axes)
       tft.drawCircle(PHASOR_CX, PHASOR_CY, PHASOR_RADIUS, COLOR_GRID); 
       tft.drawCircle(PHASOR_CX, PHASOR_CY, PHASOR_RADIUS / 2, COLOR_GRID); 
       tft.drawFastHLine(PHASOR_CX - PHASOR_RADIUS, PHASOR_CY, PHASOR_RADIUS * 2, COLOR_GRID); 
       tft.drawFastVLine(PHASOR_CX, PHASOR_CY - PHASOR_RADIUS, PHASOR_RADIUS * 2, COLOR_GRID); 
-  };
 
-  if (v_x != prev_v_x || v_y != prev_v_y) {
-    tft.drawLine(PHASOR_CX, PHASOR_CY, prev_v_x, prev_v_y, COLOR_BACKGROUND);
-    redrawPhasorGrid(); // 선 지운 후 그리드 복구
-    tft.drawLine(PHASOR_CX, PHASOR_CY, v_x, v_y, COLOR_BLUE);
-    prev_v_x = v_x; prev_v_y = v_y;
-  }
-  if (im_x != prev_im_x || im_y != prev_im_y) {
-    tft.drawLine(PHASOR_CX, PHASOR_CY, prev_im_x, prev_im_y, COLOR_BACKGROUND);
-    redrawPhasorGrid(); // 선 지운 후 그리드 복구
-    tft.drawLine(PHASOR_CX, PHASOR_CY, im_x, im_y, COLOR_ORANGE);
-    prev_im_x = im_x; prev_im_y = im_y;
-  }
-  if (i1_x != prev_i1_x || i1_y != prev_i1_y) {
-    tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i1_x, prev_i1_y, COLOR_BACKGROUND);
-    redrawPhasorGrid(); // 선 지운 후 그리드 복구
-    tft.drawLine(PHASOR_CX, PHASOR_CY, i1_x, i1_y, COLOR_RED);
-    prev_i1_x = i1_x; prev_i1_y = i1_y;
-  }
-  if (i2_x != prev_i2_x || i2_y != prev_i2_y) {
-    tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i2_x, prev_i2_y, COLOR_BACKGROUND);
-    redrawPhasorGrid(); // 선 지운 후 그리드 복구
-    tft.drawLine(PHASOR_CX, PHASOR_CY, i2_x, i2_y, COLOR_GREEN);
-    prev_i2_x = i2_x; prev_i2_y = i2_y;
+      // 4. Sort lines by length descending (Longest -> Shortest)
+      // Using a simple struct and bubble sort for 4 items
+      struct Phasor { int x; int y; float len; uint16_t col; };
+      Phasor lines[4] = {
+          {v_x, v_y, v_len, COLOR_BLUE},
+          {im_x, im_y, im_len, COLOR_ORANGE},
+          {i1_x, i1_y, i1_len, COLOR_RED},
+          {i2_x, i2_y, i2_len, COLOR_GREEN}
+      };
+
+      for (int i = 0; i < 3; i++) {
+          for (int j = i + 1; j < 4; j++) {
+              if (lines[j].len > lines[i].len) {
+                  Phasor temp = lines[i];
+                  lines[i] = lines[j];
+                  lines[j] = temp;
+              }
+          }
+      }
+
+      // 5. Draw sorted lines (Shortest will be drawn last, appearing on top)
+      for (int i = 0; i < 4; i++) {
+          tft.drawLine(PHASOR_CX, PHASOR_CY, lines[i].x, lines[i].y, lines[i].col);
+      }
+
+      // 6. Update previous coordinates
+      prev_v_x = v_x; prev_v_y = v_y;
+      prev_im_x = im_x; prev_im_y = im_y;
+      prev_i1_x = i1_x; prev_i1_y = i1_y;
+      prev_i2_x = i2_x; prev_i2_y = i2_y;
   }
 }
 

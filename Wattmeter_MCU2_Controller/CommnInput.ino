@@ -1,14 +1,20 @@
 /*
  * ==============================================================================
  * 파일명: 4. Comm_Input.ino
- * 버전: v215_DEBUG (WiFi Touch Logic Updated + Debugging)
+ * 버전: v218_TouchMod (Phase One-Shot Added) + Timer Logic Improved
  * 설명: 
- * - [Debug] 시리얼 모니터링 기능 추가 (MCU1 수신 데이터 및 로직 흐름 확인용)
- * - [Mod] 경고 해제(WARN: false) 시 화면 자동 복구 로직 비활성화 (수동 터치 해제 유도)
- * - [Fix] One-Shot Trigger 및 Debouncing 적용
- * - [Mod] 상세 트립 메시지("T_TYPE", "T_RLY") 파싱 및 릴레이 상태 동기화 추가
+ * - [System] 공통 터치 딜레이 상수(TOUCH_REPEAT_DELAY) 정의 및 적용
+ * - [Mod] One-Shot(한 번만 인식) 적용: Main, Phase(Run/Hold), Harmonics(All), Waveform(Type, Period)
+ * - [Mod] Continuous(연속 인식) 적용: Timer/Calib/Protect 화면의 (+, -) 버튼
+ * - [Fix] Waveform Trigger Mode 버튼은 연속 입력 가능하도록 예외 처리
+ * - [Legacy] CALIB_AUTO 등은 기존 로직 유지
+ * - [New] Timer Start/Stop 버튼 5초 이상 누름 시 설정값(0) 초기화 기능 추가
+ * - [Fix] Timer 설정 값 변경 시 전체 화면 갱신(screenNeedsRedraw) 제거 -> 부분 갱신 유도
  * ==============================================================================
  */
+
+// --- 공통 딜레이 상수 정의 ---
+const int TOUCH_REPEAT_DELAY = 150;
 
 // --- CSV 파싱 헬퍼 ---
 void parseCSV(String data, float* arr, int maxLen) {
@@ -30,8 +36,6 @@ void parseCSV(String data, float* arr, int maxLen) {
 void sendJsonCommand(String jsonString) {
   Serial1.print(jsonString); 
   Serial1.println(); 
-  // [Debug] 전송 명령 확인
-  // Serial.print("[TX] "); Serial.println(jsonString);
 }
 
 // --- 시리얼 입력 확인 (Serial1 사용) ---
@@ -40,9 +44,6 @@ void checkSerialInput() {
   
   String line = Serial1.readStringUntil('\n');
   if (line.length() == 0) return;
-
-  // [Debug] 원본 수신 데이터 출력 (필요시 주석 해제)
-  // Serial.print("[RX RAW] "); Serial.println(line);
 
   DeserializationError error = deserializeJson(rxJsonDoc, line);
   if (error) {
@@ -95,12 +96,8 @@ void checkSerialInput() {
   relay1_state = rxJsonDoc["R1"]; 
   relay2_state = rxJsonDoc["R2"];
   
-  // ============================================================
-  // [Mod] Strict Warning Trigger Logic (DEBUG & FIX)
-  // ============================================================
+  // Warning Logic
   bool newWarning = rxJsonDoc["WARN"];
-  
-  // [Debug] 경고 상태가 변할 때만 로그 출력 (스팸 방지)
   static bool prevWarningLog = false;
   if (newWarning != prevWarningLog) {
       Serial.print("[DEBUG] WARN Signal Changed: ");
@@ -109,33 +106,17 @@ void checkSerialInput() {
   }
 
   if (newWarning) {
-     // 1. 경고 신호 발생 시 (ON)
-     Serial.print("newWarning");
-     Serial.println(newWarning);
-     Serial.print("warningActive");
-     Serial.println(warningActive);
      if (!warningActive) {
-        Serial.println("[DEBUG] >> Warning Triggered! Resetting Settings & Switching Screen.");
-        
-        // [Mod] 상세 트립 정보 확인 및 메시지 설정
         String t_type = rxJsonDoc["T_TYPE"] | "";
         String t_rly = rxJsonDoc["T_RLY"] | "";
 
-        // [New] 트립 정보에 따른 릴레이 상태 강제 동기화
-        if (t_rly == "R1") {
-            relay1_state = false;
-        } else if (t_rly == "R2") {
-            relay2_state = true;
-        } else if (t_rly == "ALL") {
-            relay1_state = true;
-            relay2_state = true;
-        }
+        if (t_rly == "R1") { relay1_state = false; } 
+        else if (t_rly == "R2") { relay2_state = false; } 
+        else if (t_rly == "ALL") { relay1_state = false; relay2_state = false; }
 
         if (t_type.length() > 0 && t_rly.length() > 0) {
-           // 상세 정보가 있는 경우: "OVER I (R1)" 형식
            warningMessage = t_type + " (" + t_rly + ")";
         } else {
-           // 상세 정보가 없는 경우: 기존 방식 유지
            warningMessage = rxJsonDoc["MSG"] | "WARNING!";
         }
 
@@ -154,19 +135,6 @@ void checkSerialInput() {
         screenNeedsRedraw = true; 
      }
   } 
-  /* [Mod] 자동 화면 복구 비활성화 - 사용자가 터치하여 해제하도록 유도
-  else {
-     // 2. 경고 신호 해제 시 (OFF) - 화면 자동 복구 로직
-     if (warningActive) {
-        Serial.println("[DEBUG] >> Warning Cleared by MCU1. Returning to Normal Screen.");
-        
-        warningActive = false;
-        // 복귀할 화면 설정 (예: 릴레이 컨트롤 화면)
-        currentScreen = SCREEN_RELAY_CONTROL; 
-        screenNeedsRedraw = true;
-     }
-  }
-  */
 }
 
 // --- 설정 값 변경 헬퍼 (Calib Manual) ---
@@ -209,7 +177,7 @@ void adjustCalibValue(bool increase) {
   Serial1.println();
 }
 
-// --- [New] Auto Calib 값 조정 ---
+// --- Auto Calib 값 조정 ---
 void adjustAutoCalibValue(bool increase) {
   float step_to_apply = setting_steps[setting_step_index];
   switch (calib_selection) {
@@ -283,9 +251,19 @@ void checkTouchInput() {
   
   static bool prev_touched_flag = false;
 
+  // [Legacy] CALIB_AUTO 등에서 사용하는 롱 프레스용 변수 유지
+  static unsigned long touchDownTime = 0;       
+  static bool isAdjustingValue = false;        
+  static bool repeatDirection = false;         
+  static unsigned long lastRepeatTime = 0;      
+  const unsigned long INITIAL_DELAY = 1000;    
+  const unsigned long REPEAT_INTERVAL = 100;   
+
   if (!touched) {
+     touchDownTime = 0;
+     isAdjustingValue = false;
      prev_touched_flag = false;
-     return; // 터치가 없으면 리턴
+     return; 
   }
   
   // 터치 좌표 읽기
@@ -296,13 +274,25 @@ void checkTouchInput() {
   p.x = map(p.x, TS_RAW_X1, TS_RAW_X2, SCREEN_WIDTH, 0);
   p.y = map(p.y, TS_RAW_Y1, TS_RAW_Y2, SCREEN_HEIGHT, 0);
   
-  // [Fix] One-Shot Trigger Logic
+  // [Legacy] Long Press Logic (CALIB_AUTO를 위해 유지)
+  if (isAdjustingValue) {
+     if (millis() - touchDownTime > INITIAL_DELAY) {
+        if (millis() - lastRepeatTime > REPEAT_INTERVAL) {
+           lastRepeatTime = millis();
+           if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
+              adjustAutoCalibValue(repeatDirection);
+           }
+           screenNeedsRedraw = true;
+        }
+     }
+     return;
+  }
+
+  // One-Shot Flag
   bool is_new_touch = !prev_touched_flag;
   prev_touched_flag = true; 
   
-  // [Mod] Warning Screen 수동 해제 로직 (비상용)
   if (currentScreen == SCREEN_WARNING) { 
-    Serial.println("[DEBUG] >> Manual Touch Release on Warning Screen.");
     warningActive = false;
     currentScreen = SCREEN_RELAY_CONTROL;
     screenNeedsRedraw = true; 
@@ -310,24 +300,18 @@ void checkTouchInput() {
     return; 
   }
 
-  // 공통 백 버튼 영역
+  // Common Back Button
   if (currentScreen != SCREEN_HOME && currentScreen != SCREEN_WARNING) {
-    if (p.x >= 0 && p.x <= 60 && p.y >= 0 && p.y <= 40) { // Back Button
-      if (currentScreen == SCREEN_COMBINED_WAVEFORM) {
-        isWaveformFrozen = false; 
-      }
-      if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
-         auto_calib_step = 0; 
-      }
+    if (p.x >= 0 && p.x <= 60 && p.y >= 0 && p.y <= 40) { 
+      if (currentScreen == SCREEN_COMBINED_WAVEFORM) { isWaveformFrozen = false; }
+      if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO) { auto_calib_step = 0; }
 
       isMainPowerFrozen = false;
       isPhaseFrozen = false;
       isHarmonicsFrozen = false;
       
       if (currentScreen == SCREEN_SETTINGS_CALIB_MENU || currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
-        if (currentScreen == SCREEN_SETTINGS_CALIB_MANUAL && settingsChanged) { 
-           previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE;
-        } else if (currentScreen == SCREEN_SETTINGS_CALIB_AUTO && settingsChanged) {
+        if ((currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) && settingsChanged) { 
            previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE;
         } else if (currentScreen == SCREEN_SETTINGS_CALIB_MENU) {
            currentScreen = SCREEN_SETTINGS; 
@@ -344,29 +328,24 @@ void checkTouchInput() {
                currentScreen == SCREEN_SETTINGS_TIMER || 
                currentScreen == SCREEN_SETTINGS_PRESETS || 
                currentScreen == SCREEN_SETTINGS_NETWORK ||
+               currentScreen == SCREEN_SETTINGS_CREDIT ||
                currentScreen == SCREEN_CONFIRM_SAVE) {
-        if (currentScreen == SCREEN_CONFIRM_SAVE) {
-           currentScreen = SCREEN_SETTINGS; 
-        } else if (currentScreen == SCREEN_SETTINGS_NETWORK) {
-           currentScreen = SCREEN_SETTINGS;
-        } else if (currentScreen == SCREEN_SETTINGS_PRESETS) {
-           currentScreen = SCREEN_SETTINGS_ADVANCED;
-        } else if (currentScreen == SCREEN_SETTINGS_THEME || currentScreen == SCREEN_SETTINGS_RESET) {
-           currentScreen = SCREEN_SETTINGS_ADVANCED;
-        } else {
+        if (currentScreen == SCREEN_CONFIRM_SAVE) currentScreen = SCREEN_SETTINGS; 
+        else if (currentScreen == SCREEN_SETTINGS_NETWORK) currentScreen = SCREEN_SETTINGS;
+        else if (currentScreen == SCREEN_SETTINGS_PRESETS) currentScreen = SCREEN_SETTINGS_ADVANCED;
+        else if (currentScreen == SCREEN_SETTINGS_THEME || currentScreen == SCREEN_SETTINGS_RESET) currentScreen = SCREEN_SETTINGS_ADVANCED;
+        else if (currentScreen == SCREEN_SETTINGS_CREDIT) currentScreen = SCREEN_SETTINGS_ADVANCED; 
+        else {
            if (currentScreen == SCREEN_SETTINGS_TIMER) currentScreen = SCREEN_SETTINGS;
            else currentScreen = SCREEN_SETTINGS_ADVANCED;
         }
       }
-      else if (currentScreen == SCREEN_SETTINGS_ADVANCED) {
-        currentScreen = SCREEN_SETTINGS;
+      else if (currentScreen == SCREEN_CREDIT_MEMBER_1 || currentScreen == SCREEN_CREDIT_MEMBER_2 || currentScreen == SCREEN_CREDIT_MEMBER_3) {
+        currentScreen = SCREEN_SETTINGS_CREDIT;
       }
-      else if (currentScreen == SCREEN_SETTINGS || currentScreen == SCREEN_RELAY_CONTROL) {
-        currentScreen = SCREEN_HOME;
-      }
-      else {
-        currentScreen = SCREEN_HOME;
-      }
+      else if (currentScreen == SCREEN_SETTINGS_ADVANCED) currentScreen = SCREEN_SETTINGS;
+      else if (currentScreen == SCREEN_SETTINGS || currentScreen == SCREEN_RELAY_CONTROL) currentScreen = SCREEN_HOME;
+      else currentScreen = SCREEN_HOME;
       
       screenNeedsRedraw = true;
       delay(100); 
@@ -385,36 +364,45 @@ void checkTouchInput() {
       break;
 
     case SCREEN_MAIN_POWER: 
-       if (p.x >= 15 && p.x <= 105 && p.y >= 190 && p.y <= 235) {
-          isMainPowerFrozen = !isMainPowerFrozen;
-          String text = isMainPowerFrozen ? "RUN" : "HOLD";
-          drawButton(20, 195, 80, 35, text); delay(200);
+       // [Mod] One-Shot applied
+       if (is_new_touch) {
+           if (p.x >= 15 && p.x <= 105 && p.y >= 190 && p.y <= 235) {
+              isMainPowerFrozen = !isMainPowerFrozen;
+              String text = isMainPowerFrozen ? "RUN" : "HOLD";
+              drawButton(20, 195, 80, 35, text); delay(200);
+           }
        }
        break;
 
     case SCREEN_PHASE_DIFFERENCE:
-       if (p.x >= 15 && p.x <= 85 && p.y >= 200 && p.y <= 235) {
-          isPhaseFrozen = !isPhaseFrozen;
-          String text = isPhaseFrozen ? "RUN" : "HOLD";
-          drawButton(20, 205, 60, 25, text); delay(200);
+       // [Mod] One-Shot applied (Added per request)
+       if (is_new_touch) {
+           if (p.x >= 15 && p.x <= 85 && p.y >= 200 && p.y <= 235) {
+              isPhaseFrozen = !isPhaseFrozen;
+              String text = isPhaseFrozen ? "RUN" : "HOLD";
+              drawButton(20, 205, 60, 25, text); delay(200);
+           }
        }
        break;
 
     case SCREEN_HARMONICS: 
-      if (p.x >= 5 && p.x <= 105 && p.y >= 195 && p.y <= 240) { 
-          harmonicsSource = !harmonicsSource; 
-          harmonicsSrcLabel = (harmonicsSource == 0) ? "Src: V" : "Src: I";
-          screenNeedsRedraw = false; 
-          delay(200);
-      }
-      else if (p.x >= 110 && p.x <= 215 && p.y >= 195 && p.y <= 240) { 
-          isHarmonicsFrozen = !isHarmonicsFrozen; 
-          delay(200);
-      }
-      else if (p.x >= 220 && p.x <= 315 && p.y >= 195 && p.y <= 240) { 
-          harmonicsViewMode = !harmonicsViewMode; 
-          screenNeedsRedraw = true; 
-          delay(200);
+      // [Mod] One-Shot applied to all buttons
+      if (is_new_touch) {
+          if (p.x >= 5 && p.x <= 105 && p.y >= 195 && p.y <= 240) { 
+              harmonicsSource = !harmonicsSource; 
+              harmonicsSrcLabel = (harmonicsSource == 0) ? "Src: V" : "Src: I";
+              screenNeedsRedraw = false; 
+              delay(200);
+          }
+          else if (p.x >= 110 && p.x <= 215 && p.y >= 195 && p.y <= 240) { 
+              isHarmonicsFrozen = !isHarmonicsFrozen; 
+              delay(200);
+          }
+          else if (p.x >= 220 && p.x <= 315 && p.y >= 195 && p.y <= 240) { 
+              harmonicsViewMode = !harmonicsViewMode; 
+              screenNeedsRedraw = true; 
+              delay(200);
+          }
       }
       break;
 
@@ -448,36 +436,21 @@ void checkTouchInput() {
       break;
 
     case SCREEN_SETTINGS_NETWORK: 
-      // [Fix] One-Shot Trigger 적용
       if (is_new_touch) {
           if (p.x >= 55 && p.x <= 265 && p.y >= 45 && p.y <= 105) {
-            if (wifiState == WIFI_OFF) {
-               wifiState = WIFI_WAIT;
-               lastWifiRetryTime = 0; // 즉시 시도 트리거
-               screenNeedsRedraw = true;
-            } else if (wifiState == WIFI_WAIT) {
-               wifiState = WIFI_OFF;
-               screenNeedsRedraw = true;
-            } else if (wifiState == WIFI_CONNECTED_STATE) {
-               sendAT("AT+CWQAP\r\n", 1000, true); 
-               wifiState = WIFI_OFF;
-               screenNeedsRedraw = true;
-            }
+            if (wifiState == WIFI_OFF) { wifiState = WIFI_WAIT; lastWifiRetryTime = 0; screenNeedsRedraw = true; } 
+            else if (wifiState == WIFI_WAIT) { wifiState = WIFI_OFF; screenNeedsRedraw = true; } 
+            else if (wifiState == WIFI_CONNECTED_STATE) { sendAT("AT+CWQAP\r\n", 1000, true); wifiState = WIFI_OFF; screenNeedsRedraw = true; }
             delay(150); 
           } 
       }
       break;
 
     case SCREEN_SETTINGS_ADVANCED:
-      if (p.x >= 15 && p.x <= 305 && p.y >= 45 && p.y <= 95) { 
-          currentScreen = SCREEN_SETTINGS_THEME; screenNeedsRedraw = true; 
-      } 
-      else if (p.x >= 15 && p.x <= 305 && p.y >= 105 && p.y <= 155) { 
-          currentScreen = SCREEN_SETTINGS_PRESETS; screenNeedsRedraw = true; 
-      } 
-      else if (p.x >= 15 && p.x <= 305 && p.y >= 165 && p.y <= 215) { 
-          currentScreen = SCREEN_SETTINGS_RESET; screenNeedsRedraw = true; 
-      }
+      if (p.x >= 15 && p.x <= 155 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_SETTINGS_THEME; screenNeedsRedraw = true; } 
+      else if (p.x >= 165 && p.x <= 305 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_SETTINGS_PRESETS; screenNeedsRedraw = true; } 
+      else if (p.x >= 15 && p.x <= 155 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_SETTINGS_RESET; screenNeedsRedraw = true; }
+      else if (p.x >= 165 && p.x <= 305 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_SETTINGS_CREDIT; screenNeedsRedraw = true; }
       break;
       
     case SCREEN_SETTINGS_PRESETS: 
@@ -498,26 +471,23 @@ void checkTouchInput() {
       break;
 
     case SCREEN_SETTINGS_TIMER:
+      // [Mod] Target Relay, Step, Start -> One-Shot
       if (is_new_touch) {
           if (p.x >= 60 && p.x <= 260 && p.y >= 40 && p.y <= 90) { 
              timer_target_relay++;
              if (timer_target_relay > 3) timer_target_relay = 1; 
              delay(150); 
           }
-          else if (p.x >= 15 && p.x <= 85 && p.y >= 135 && p.y <= 185) { 
-            if (temp_timer_setting_seconds >= TIMER_STEP_VALUES[timer_step_index]) temp_timer_setting_seconds -= TIMER_STEP_VALUES[timer_step_index]; else temp_timer_setting_seconds = 0;
-            delay(150);
-          } else if (p.x >= 85 && p.x <= 155 && p.y >= 135 && p.y <= 185) { 
+          else if (p.x >= 85 && p.x <= 155 && p.y >= 135 && p.y <= 185) { 
             timer_step_index = (timer_step_index + 1) % 6; 
-            delay(150);
-          } else if (p.x >= 155 && p.x <= 225 && p.y >= 135 && p.y <= 185) { 
-            if (temp_timer_setting_seconds + TIMER_STEP_VALUES[timer_step_index] <= 359999) temp_timer_setting_seconds += TIMER_STEP_VALUES[timer_step_index];
             delay(150);
           } 
           else if (p.x >= 225 && p.x <= 315 && p.y >= 135 && p.y <= 185) {
-            if (is_timer_active) {
-               is_timer_active = false;
-            } else {
+            // [Mod] Long Press Start Time Record
+            touchDownTime = millis();
+            
+            if (is_timer_active) { is_timer_active = false; } 
+            else {
                if (temp_timer_setting_seconds > 0) {
                   timer_seconds_left = temp_timer_setting_seconds;
                   is_timer_active = true;
@@ -528,18 +498,47 @@ void checkTouchInput() {
             delay(150);
           }
       }
+      // [Mod] (+, -) Button -> Continuous (Loop + Delay)
+      if (p.x >= 15 && p.x <= 85 && p.y >= 135 && p.y <= 185) { 
+        // [-] Button
+        if (temp_timer_setting_seconds >= TIMER_STEP_VALUES[timer_step_index]) temp_timer_setting_seconds -= TIMER_STEP_VALUES[timer_step_index]; else temp_timer_setting_seconds = 0;
+        // screenNeedsRedraw = true; // [Fix] Partial Update only
+        delay(TOUCH_REPEAT_DELAY);
+      } else if (p.x >= 155 && p.x <= 225 && p.y >= 135 && p.y <= 185) { 
+        // [+] Button
+        if (temp_timer_setting_seconds + TIMER_STEP_VALUES[timer_step_index] <= 359999) temp_timer_setting_seconds += TIMER_STEP_VALUES[timer_step_index];
+        // screenNeedsRedraw = true; // [Fix] Partial Update only
+        delay(TOUCH_REPEAT_DELAY);
+      } 
+      // [Mod] Start/Stop Button Long Press Check (5 sec -> Reset to 0)
+      else if (p.x >= 225 && p.x <= 315 && p.y >= 135 && p.y <= 185) {
+         if (touchDownTime != 0 && (millis() - touchDownTime > 5000)) {
+             temp_timer_setting_seconds = 0;
+             // screenNeedsRedraw = true; // [Fix] Partial Update only
+             touchDownTime = 0; // Reset to avoid multiple triggers
+         }
+      }
       break;
 
     case SCREEN_SETTINGS_CALIB_MANUAL:
+      // [Mod] Selection -> One-Shot
       if (is_new_touch) {
           if (p.x >= 15 && p.x <= 85 && p.y >= 175 && p.y <= 225) { calib_selection = (calib_selection - 1 + NUM_CALIB_SETTINGS) % NUM_CALIB_SETTINGS; delay(150); }
           else if (p.x >= 85 && p.x <= 155 && p.y >= 175 && p.y <= 225) { calib_selection = (calib_selection + 1) % NUM_CALIB_SETTINGS; delay(150); }
-          else if (p.x >= 175 && p.x <= 245 && p.y >= 175 && p.y <= 225) { adjustCalibValue(false); delay(150); }
-          else if (p.x >= 245 && p.x <= 315 && p.y >= 175 && p.y <= 225) { adjustCalibValue(true); delay(150); }
+      }
+      // [Mod] (+, -) Button -> Continuous (Loop + Delay)
+      if (p.x >= 175 && p.x <= 245 && p.y >= 175 && p.y <= 225) { 
+          adjustCalibValue(false); 
+          delay(TOUCH_REPEAT_DELAY); 
+      }
+      else if (p.x >= 245 && p.x <= 315 && p.y >= 175 && p.y <= 225) { 
+          adjustCalibValue(true); 
+          delay(TOUCH_REPEAT_DELAY); 
       }
       break;
       
     case SCREEN_SETTINGS_CALIB_AUTO:
+      // [Legacy] 기존 로직 유지 (isAdjustingValue 방식)
       if (auto_calib_step == 0) {
          if (p.x >= 75 && p.x <= 245 && p.y >= 115 && p.y <= 165) { auto_calib_step = 1; screenNeedsRedraw = true; }
       } else if (auto_calib_step == 2) {
@@ -550,8 +549,16 @@ void checkTouchInput() {
          if (is_new_touch) {
              if (p.x >= 15 && p.x <= 85 && p.y >= 175 && p.y <= 225) { calib_selection = (calib_selection - 1 + NUM_AUTOCALIB_INPUTS) % NUM_AUTOCALIB_INPUTS; delay(150); }
              else if (p.x >= 85 && p.x <= 155 && p.y >= 175 && p.y <= 225) { calib_selection = (calib_selection + 1) % NUM_AUTOCALIB_INPUTS; delay(150); }
-             else if (p.x >= 175 && p.x <= 245 && p.y >= 175 && p.y <= 225) { adjustAutoCalibValue(false); delay(150); }
-             else if (p.x >= 245 && p.x <= 315 && p.y >= 175 && p.y <= 225) { adjustAutoCalibValue(true); delay(150); }
+             else if (p.x >= 175 && p.x <= 245 && p.y >= 175 && p.y <= 225) { 
+                 adjustAutoCalibValue(false); 
+                 isAdjustingValue = true; repeatDirection = false; touchDownTime = millis(); lastRepeatTime = millis();
+                 delay(TOUCH_REPEAT_DELAY); 
+             }
+             else if (p.x >= 245 && p.x <= 315 && p.y >= 175 && p.y <= 225) { 
+                 adjustAutoCalibValue(true); 
+                 isAdjustingValue = true; repeatDirection = true; touchDownTime = millis(); lastRepeatTime = millis();
+                 delay(TOUCH_REPEAT_DELAY); 
+             }
              else if (p.x >= 255 && p.x <= 320 && p.y >= 0 && p.y <= 40) { calculateNewGains(temp_true_v, temp_true_i); auto_calib_step = 4; screenNeedsRedraw = true; delay(150); }
          }
       } else if (auto_calib_step == 4) {
@@ -563,11 +570,19 @@ void checkTouchInput() {
       break;
 
     case SCREEN_SETTINGS_PROTECT:
+      // [Mod] Selection -> One-Shot
       if (is_new_touch) {
           if (p.x >= 15 && p.x <= 85 && p.y >= 175 && p.y <= 225) { protect_selection = (protect_selection - 1 + NUM_PROTECT_SETTINGS) % NUM_PROTECT_SETTINGS; delay(150); }
           else if (p.x >= 85 && p.x <= 155 && p.y >= 175 && p.y <= 225) { protect_selection = (protect_selection + 1) % NUM_PROTECT_SETTINGS; delay(150); }
-          else if (p.x >= 175 && p.x <= 245 && p.y >= 175 && p.y <= 225) { adjustProtectValue(false); delay(150); }
-          else if (p.x >= 245 && p.x <= 315 && p.y >= 175 && p.y <= 225) { adjustProtectValue(true); delay(150); }
+      }
+      // [Mod] (+, -) Button -> Continuous (Loop + Delay)
+      if (p.x >= 175 && p.x <= 245 && p.y >= 175 && p.y <= 225) { 
+          adjustProtectValue(false); 
+          delay(TOUCH_REPEAT_DELAY); 
+      }
+      else if (p.x >= 245 && p.x <= 315 && p.y >= 175 && p.y <= 225) { 
+          adjustProtectValue(true); 
+          delay(TOUCH_REPEAT_DELAY); 
       }
       break;
 
@@ -612,20 +627,36 @@ void checkTouchInput() {
       break;
 
     case SCREEN_COMBINED_WAVEFORM:
-      if (p.x >= 5 && p.x <= 110 && p.y >= 190 && p.y <= 235) {
-        waveformPlotType = (waveformPlotType + 1) % 3;
-        drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
-        screenNeedsRedraw = true; 
+      // [Mod] One-Shot: Type(Left), Period(Right)
+      if (is_new_touch) {
+          if (p.x >= 5 && p.x <= 110 && p.y >= 190 && p.y <= 235) {
+            waveformPlotType = (waveformPlotType + 1) % 3;
+            drawButton(10, 195, 100, 35, WAVEFORM_TYPE_LABELS[waveformPlotType]);
+            screenNeedsRedraw = true; 
+          }
+          else if (p.x >= 215 && p.x <= 315 && p.y >= 190 && p.y <= 235) {
+            waveformPeriodIndex = (waveformPeriodIndex + 1) % 3;
+            drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
+          }
       }
-      else if (p.x >= 110 && p.x <= 215 && p.y >= 190 && p.y <= 235) {
+      // [Fix] Trigger Mode(Center) -> Continuous allowed (Trigger check during press)
+      if (p.x >= 110 && p.x <= 215 && p.y >= 190 && p.y <= 235) {
         if (waveformTriggerMode == 2 && isWaveformFrozen) isWaveformFrozen = false; 
         else { waveformTriggerMode = (waveformTriggerMode + 1) % 3; isWaveformFrozen = false; }
         drawButton(115, 195, 100, 35, String(WAVEFORM_MODE_LABELS[waveformTriggerMode]));
+        delay(TOUCH_REPEAT_DELAY); // Simple debounce
       }
-      else if (p.x >= 215 && p.x <= 315 && p.y >= 190 && p.y <= 235) {
-        waveformPeriodIndex = (waveformPeriodIndex + 1) % 3;
-        drawButton(220, 195, 90, 35, WAVEFORM_PERIOD_LABELS[waveformPeriodIndex]);
-      }
+      break;
+      
+    case SCREEN_SETTINGS_CREDIT:
+      if (p.x >= 15 && p.x <= 305 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_CREDIT_MEMBER_1; screenNeedsRedraw = true; }
+      else if (p.x >= 15 && p.x <= 305 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_CREDIT_MEMBER_2; screenNeedsRedraw = true; }
+      else if (p.x >= 15 && p.x <= 305 && p.y >= 165 && p.y <= 215) { currentScreen = SCREEN_CREDIT_MEMBER_3; screenNeedsRedraw = true; }
+      break;
+
+    case SCREEN_CREDIT_MEMBER_1:
+    case SCREEN_CREDIT_MEMBER_2:
+    case SCREEN_CREDIT_MEMBER_3:
       break;
   }
   delay(100); 

@@ -246,6 +246,9 @@ void checkSerialCommand() {
       if (cmd == "ACK_WARN") {
          warningActive = false;
       }
+      else if (cmd == "REQ_DATA") { // [New] 데이터 요청 명령 처리
+         sendMainData();
+      }
       
       if (cmd == "REQ_WAVEFORM") {
          int mode = rxJsonDoc["MODE"]; 
@@ -496,7 +499,7 @@ void perform_unified_analysis() {
   
   thd_v_value = calculateTHD_FFT(vReal, FUNDALMENTAL_BIN); 
   
-float thd_v_raw = calculateTHD_FFT(vReal, FUNDALMENTAL_BIN);
+  float thd_v_raw = calculateTHD_FFT(vReal, FUNDALMENTAL_BIN);
   float thd_i_raw = 0.0;
   if (I_rms > CURRENT_CUTOFF_THRES) {
       thd_i_raw = calculateTHD_FFT(iReal, FUNDALMENTAL_BIN);
@@ -508,6 +511,54 @@ float thd_v_raw = calculateTHD_FFT(vReal, FUNDALMENTAL_BIN);
 
   thd_v_value = thd_v_raw * THD_V_CALIB_FACTOR;
   thd_i_value = thd_i_raw * THD_I_CALIB_FACTOR;
+
+  // ------------------------------------------------------------------
+  // [New] Phase Calculation for Load 1 & Load 2
+  // (Executed after Main Current THD calc to reuse iReal buffer safely)
+  // ------------------------------------------------------------------
+  
+  // --- Load 1 Calculation ---
+  if (I_rms_load1 > CURRENT_CUTOFF_THRES) {
+      for(int k=0; k<FFT_N; k++) {
+          iReal[k] = (double)raw_i1_buf[k] - i1_offset;
+          iImag[k] = 0;
+      }
+      FFT_I.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+      FFT_I.compute(FFTDirection::Forward);
+      
+      double i1_ang = atan2(iImag[FUNDALMENTAL_BIN], iReal[FUNDALMENTAL_BIN]);
+      double phase_diff_1 = ang_v - i1_ang;
+      
+      phase_diff_1 -= (PHASE_CORRECTION_DEG * PI / 180.0);
+      while (phase_diff_1 > PI) phase_diff_1 -= 2.0 * PI;
+      while (phase_diff_1 < -PI) phase_diff_1 += 2.0 * PI;
+      
+      phase_load1_deg = phase_diff_1 * (180.0 / PI);
+  } else {
+      phase_load1_deg = 0.0;
+  }
+
+  // --- Load 2 Calculation ---
+  if (I_rms_load2 > CURRENT_CUTOFF_THRES) {
+      for(int k=0; k<FFT_N; k++) {
+          iReal[k] = (double)raw_i2_buf[k] - i2_offset;
+          iImag[k] = 0;
+      }
+      FFT_I.windowing(FFTWindow::Hamming, FFTDirection::Forward);
+      FFT_I.compute(FFTDirection::Forward);
+      
+      double i2_ang = atan2(iImag[FUNDALMENTAL_BIN], iReal[FUNDALMENTAL_BIN]);
+      double phase_diff_2 = ang_v - i2_ang;
+      
+      phase_diff_2 -= (PHASE_CORRECTION_DEG * PI / 180.0);
+      while (phase_diff_2 > PI) phase_diff_2 -= 2.0 * PI;
+      while (phase_diff_2 < -PI) phase_diff_2 += 2.0 * PI;
+      
+      phase_load2_deg = phase_diff_2 * (180.0 / PI);
+  } else {
+      phase_load2_deg = 0.0;
+  }
+
   runFuzzyLogic();
 }
 
