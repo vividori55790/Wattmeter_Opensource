@@ -1,18 +1,21 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v217 (Relay Fix, Grid Restore, Force Refresh)
+ * 버전: v218 (Auto Calib Refresh Fix)
  * 설명: 
  * - [Fix] 릴레이 상태 표시: 변수 상태를 그대로 반영하도록 로직 단순화
  * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
  * - [Fix] 화면 갱신: 화면 진입 시(screenNeedsRedraw) 값이 같아도 강제 출력
  * - [Mod] 고조파 소스 변경 시 텍스트 리스트 강제 갱신 로직 추가
  * - [Mod] 페이서 다이어그램: 전체 삭제 -> 그리드 복구 -> 길이순(긴->짧은) 정렬 그리기 적용
+ * - [Fix] Auto Calibration 재진입 시 값 갱신 안 되는 오류 수정 (resetViewStates 초기화 추가)
  * ==============================================================================
  */
 
 // 외부 전역 변수 참조 (Controller에서 정의됨)
 extern bool prev_is_timer_active; 
+extern float prev_temp_true_v; // Controller에서 정의됨
+extern float prev_temp_true_i; // Controller에서 정의됨
 
 // [New] 전역으로 승격된 이전 값 저장 변수들 (화면 전환 시 초기화를 위함)
 // 메인 전력 화면
@@ -30,6 +33,10 @@ float prev_disp_thd_i_main = -1.0;
 // 타이머 화면
 uint32_t prev_timer_display_time = 0xFFFFFFFF;
 bool prev_timer_active_state = false;
+
+// Auto Calibration 화면 (Step 5 검증용) - 전역으로 이동
+float prev_disp_v = -1.0;
+float prev_disp_i = -1.0;
 
 // 고조파 그래프 이전 높이
 static int prev_bar_heights[16]; 
@@ -130,6 +137,12 @@ void resetViewStates() {
     prev_protect_selection = -1;
     prev_VOLTAGE_THRESHOLD = -1.0;
     
+    // [Fix] Auto Calibration 화면 초기화
+    prev_temp_true_v = -1.0;
+    prev_temp_true_i = -1.0;
+    prev_disp_v = -1.0;
+    prev_disp_i = -1.0;
+
     // 릴레이 컨트롤 초기화
     prev_r1_state = !relay1_state; // 강제 불일치 유도
     prev_r2_state = !relay2_state;
@@ -850,8 +863,7 @@ void runAutoCalib() {
   } else if (auto_calib_step == 5) {
       float eff_V_mult = BASE_V_CALIB_RMS * V_MULTIPLIER;
       float eff_I_mult = BASE_I_CALIB_RMS * I_MULTIPLIER;
-      static float prev_disp_v = -1;
-      static float prev_disp_i = -1;
+      // [Mod] static 제거 (전역 변수 사용)
       printTFTValue(60, 80, V_rms, prev_disp_v, 1, COLOR_BLUE, " V");
       printTFTValue(60, 110, I_rms, prev_disp_i, 2, COLOR_ORANGE, " A");
       prev_disp_v = V_rms; prev_disp_i = I_rms;

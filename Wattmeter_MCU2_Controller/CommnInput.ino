@@ -109,11 +109,16 @@ void checkSerialInput() {
      if (!warningActive) {
         String t_type = rxJsonDoc["T_TYPE"] | "";
         String t_rly = rxJsonDoc["T_RLY"] | "";
-
-        if (t_rly == "R1") { relay1_state = false; } 
-        else if (t_rly == "R2") { relay2_state = false; } 
-        else if (t_rly == "ALL") { relay1_state = false; relay2_state = false; }
-
+        if (t_rly == "R1") {
+               relay1_state = true;
+           } 
+           else if (t_rly == "R2") {
+               relay2_state = true;
+           } 
+           else if (t_rly == "ALL") {
+               relay1_state = true;
+               relay2_state = true;
+           } 
         if (t_type.length() > 0 && t_rly.length() > 0) {
            warningMessage = t_type + " (" + t_rly + ")";
         } else {

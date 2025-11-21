@@ -204,18 +204,20 @@ void loop() {
           else if (fuzzy_trip) tripReason = "OVER P";
 
           if (I_rms_load1 > I_rms_load2) {
-             relay1_state = false; 
+             relay1_state = true; 
              digitalWrite(RELAY_1_PIN, HIGH);
              warningMessage = "TRIP: LOAD 1";
              tripRelay = "R1"; // [New] Load 1 트립 식별
           } else if (I_rms_load2 > I_rms_load1) {
-             relay2_state = false; 
+             relay2_state = true; 
              digitalWrite(RELAY_2_PIN, HIGH);
              warningMessage = "TRIP: LOAD 2";
              tripRelay = "R2"; // [New] Load 2 트립 식별
           } else {
-             relay2_state = false; 
+             relay2_state = true; 
              digitalWrite(RELAY_2_PIN, HIGH);
+             relay1_state = true; 
+             digitalWrite(RELAY_1_PIN, HIGH);
              warningMessage = "TRIP: LOAD 2 (EQ)";
              tripRelay = "ALL"; // [New] Eq -> ALL 식별
           }
