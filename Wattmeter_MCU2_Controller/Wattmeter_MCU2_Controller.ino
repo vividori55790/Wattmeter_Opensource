@@ -1,12 +1,13 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v215 (WiFi Auto-Connect & Logic Fix)
+ * 버전: v215 (WiFi Auto-Connect & Logic Fix) + Emergency Reset Added
  * 설명: 
  * - [Mod] WiFi 연결 로직 전면 수정: 상태 머신 기반 (OFF -> WAIT -> ON)
  * - [Mod] 데이터 전송: 선택 옵션 제거, P(유효전력)값 고정 전송
  * - [Mod] 백그라운드 전송: 화면 상태와 무관하게 연결 시 주기적 전송
  * - [Fix] 화면 진입 시 강제 갱신 로직 추가 (resetViewStates 호출)
+ * - [New] 비상 화면 복구 기능: 10초 이상 터치 시 디스플레이 리셋
  * ==============================================================================
  */
 
@@ -439,6 +440,35 @@ void setup() {
 // 2. Main Loop
 // ==============================================================================
 void loop() {
+  // ========================================================================
+  // [New] 비상 화면 복구 기능: 10초 이상 터치 감지 시 디스플레이 드라이버 리셋
+  // ========================================================================
+  static unsigned long touchStartTime = 0;
+  
+  SPI.beginTransaction(spiSettingsTouch);
+  bool isTouched = ts.touched();
+  SPI.endTransaction();
+
+  if (isTouched) {
+     if (touchStartTime == 0) {
+        touchStartTime = millis();
+     } else if (millis() - touchStartTime > 10000) { // 10초 초과
+        Serial.println("[SYSTEM] Emergency Display Reset Triggered");
+        
+        // 디스플레이 및 UI 복구 절차 실행
+        tft.begin(); 
+        tft.setRotation(3); 
+        setTheme(); 
+        resetViewStates(); 
+        screenNeedsRedraw = true;
+        
+        touchStartTime = 0; // 반복 실행 방지 및 카운터 초기화
+     }
+  } else {
+     touchStartTime = 0;
+  }
+  // ========================================================================
+
   checkTouchInput(); 
   checkSerialInput(); 
   handleNetworkLogic(); // [Mod] 백그라운드 네트워크 상태 관리 (WAIT -> ON)

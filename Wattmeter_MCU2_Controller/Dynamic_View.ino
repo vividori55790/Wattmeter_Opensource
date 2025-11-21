@@ -1,12 +1,12 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v216 (Phasor Redraw Fix)
+ * 버전: v217 (Relay Fix, Grid Restore, Force Refresh)
  * 설명: 
- * - [Mod] 네트워크 설정 화면 UI 단순화
- * - [Mod] 화면 진입 시 강제 갱신을 위한 이전 값(prev_) 변수 전역화 및 초기화(resetViewStates)
- * - [Mod] 고조파 그래프 그리드 지우개 현상 수정 (길이 비교 및 부분 갱신)
- * - [Fix] 페이서 작도 화면 진입 시 그래프가 그려지지 않는 문제 수정 (좌표 리셋 추가)
+ * - [Fix] 릴레이 상태 표시: 변수 상태를 그대로 반영하도록 로직 단순화
+ * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
+ * - [Fix] 화면 갱신: 화면 진입 시(screenNeedsRedraw) 값이 같아도 강제 출력
+ * - [Mod] 고조파 소스 변경 시 텍스트 리스트 강제 갱신 로직 추가
  * ==============================================================================
  */
 
@@ -35,8 +35,9 @@ static int prev_bar_heights[16];
 static float prev_text_vals[16];  
 
 // --- 헬퍼: 값 출력 (Float) ---
+// [Mod] screenNeedsRedraw가 true면 값이 같아도 강제로 출력
 void printTFTValue(int x, int y, float value, float prev_value, int precision, uint16_t color, String unit) {
-  if (abs(value - prev_value) < (pow(10, -precision) / 2.0)) return; 
+  if (!screenNeedsRedraw && abs(value - prev_value) < (pow(10, -precision) / 2.0)) return; 
   
   char buffer[20];
   tft.setTextColor(COLOR_BACKGROUND); 
@@ -50,8 +51,9 @@ void printTFTValue(int x, int y, float value, float prev_value, int precision, u
 }
 
 // --- 헬퍼: 값 출력 (Int) ---
+// [Mod] screenNeedsRedraw가 true면 값이 같아도 강제로 출력
 void printTFTValue(int x, int y, int value, int prev_value, uint16_t color, String unit) {
-  if (value == prev_value) return; 
+  if (!screenNeedsRedraw && value == prev_value) return; 
   
   char buffer[20];
   tft.setTextColor(COLOR_BACKGROUND); 
@@ -66,8 +68,9 @@ void printTFTValue(int x, int y, int value, int prev_value, uint16_t color, Stri
 }
 
 // --- 헬퍼: 값 출력 (String) ---
+// [Mod] screenNeedsRedraw가 true면 값이 같아도 강제로 출력
 void printTFTValue(int x, int y, String value, String prev_value, uint16_t color) {
-  if (value.equals(prev_value)) return; 
+  if (!screenNeedsRedraw && value.equals(prev_value)) return; 
   
   tft.setTextColor(COLOR_BACKGROUND); 
   tft.setCursor(x, y);
@@ -199,7 +202,7 @@ void displayMainScreenValues() {
   printTFTValue(col1_value_x, 40, V_rms, prev_disp_V_rms, 1, COLOR_BLUE, " V");
   prev_disp_V_rms = V_rms;
   
-  if (abs(I_rms - prev_disp_I_rms) > 0.001) {
+  if (abs(I_rms - prev_disp_I_rms) > 0.001 || screenNeedsRedraw) {
       tft.fillRect(col1_value_x, 65, col_w_half, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 65);
@@ -211,7 +214,7 @@ void displayMainScreenValues() {
       prev_disp_I_rms = I_rms;
   }
   
-  if (abs(P_real - prev_disp_P_real) > 0.1) {
+  if (abs(P_real - prev_disp_P_real) > 0.1 || screenNeedsRedraw) {
       tft.fillRect(col1_value_x, 90, col_w_half, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_DARKGREEN);
       tft.setCursor(col1_value_x, 90);
@@ -226,7 +229,7 @@ void displayMainScreenValues() {
   printTFTValue(col2_value_x, 115, PF, prev_disp_PF, 2, COLOR_MAGENTA, "");
   prev_disp_PF = PF;
   
-  if (abs(Q_reactive - prev_disp_Q_reactive) > 0.1) {
+  if (abs(Q_reactive - prev_disp_Q_reactive) > 0.1 || screenNeedsRedraw) {
       tft.fillRect(col1_value_x, 115, col_w_half, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 115);
@@ -238,7 +241,7 @@ void displayMainScreenValues() {
       prev_disp_Q_reactive = Q_reactive;
   }
 
-  if (abs(I_rms_load1 - prev_disp_I_rms_load1) > 0.001) {
+  if (abs(I_rms_load1 - prev_disp_I_rms_load1) > 0.001 || screenNeedsRedraw) {
       tft.fillRect(col2_value_x, 40, col_w_half_wide, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_RED);
       tft.setCursor(col2_value_x, 40); 
@@ -250,7 +253,7 @@ void displayMainScreenValues() {
       prev_disp_I_rms_load1 = I_rms_load1;
   }
 
-  if (abs(I_rms_load2 - prev_disp_I_rms_load2) > 0.001) {
+  if (abs(I_rms_load2 - prev_disp_I_rms_load2) > 0.001 || screenNeedsRedraw) {
       tft.fillRect(col2_value_x, 65, col_w_half_wide, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_GREEN);
       tft.setCursor(col2_value_x, 65); 
@@ -262,7 +265,7 @@ void displayMainScreenValues() {
       prev_disp_I_rms_load2 = I_rms_load2;
   }
 
-  if (abs(S_apparent - prev_disp_S_apparent) > 0.1) {
+  if (abs(S_apparent - prev_disp_S_apparent) > 0.1 || screenNeedsRedraw) {
       tft.fillRect(col2_value_x, 90, col_w_half_wide, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_TEXT_PRIMARY);
       tft.setCursor(col2_value_x, 90); 
@@ -320,23 +323,35 @@ void displayPhaseScreenValues() {
   int i2_x = PHASOR_CX + (int)(i2_len * cos(phase_load2_deg * (M_PI / 180.0)));
   int i2_y = PHASOR_CY - (int)(i2_len * sin(phase_load2_deg * (M_PI / 180.0)));
 
+  // [New] 그리드 복구용 람다 함수 (지우개 현상 방지)
+  auto redrawPhasorGrid = [&]() {
+      tft.drawCircle(PHASOR_CX, PHASOR_CY, PHASOR_RADIUS, COLOR_GRID); 
+      tft.drawCircle(PHASOR_CX, PHASOR_CY, PHASOR_RADIUS / 2, COLOR_GRID); 
+      tft.drawFastHLine(PHASOR_CX - PHASOR_RADIUS, PHASOR_CY, PHASOR_RADIUS * 2, COLOR_GRID); 
+      tft.drawFastVLine(PHASOR_CX, PHASOR_CY - PHASOR_RADIUS, PHASOR_RADIUS * 2, COLOR_GRID); 
+  };
+
   if (v_x != prev_v_x || v_y != prev_v_y) {
     tft.drawLine(PHASOR_CX, PHASOR_CY, prev_v_x, prev_v_y, COLOR_BACKGROUND);
+    redrawPhasorGrid(); // 선 지운 후 그리드 복구
     tft.drawLine(PHASOR_CX, PHASOR_CY, v_x, v_y, COLOR_BLUE);
     prev_v_x = v_x; prev_v_y = v_y;
   }
   if (im_x != prev_im_x || im_y != prev_im_y) {
     tft.drawLine(PHASOR_CX, PHASOR_CY, prev_im_x, prev_im_y, COLOR_BACKGROUND);
+    redrawPhasorGrid(); // 선 지운 후 그리드 복구
     tft.drawLine(PHASOR_CX, PHASOR_CY, im_x, im_y, COLOR_ORANGE);
     prev_im_x = im_x; prev_im_y = im_y;
   }
   if (i1_x != prev_i1_x || i1_y != prev_i1_y) {
     tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i1_x, prev_i1_y, COLOR_BACKGROUND);
+    redrawPhasorGrid(); // 선 지운 후 그리드 복구
     tft.drawLine(PHASOR_CX, PHASOR_CY, i1_x, i1_y, COLOR_RED);
     prev_i1_x = i1_x; prev_i1_y = i1_y;
   }
   if (i2_x != prev_i2_x || i2_y != prev_i2_y) {
     tft.drawLine(PHASOR_CX, PHASOR_CY, prev_i2_x, prev_i2_y, COLOR_BACKGROUND);
+    redrawPhasorGrid(); // 선 지운 후 그리드 복구
     tft.drawLine(PHASOR_CX, PHASOR_CY, i2_x, i2_y, COLOR_GREEN);
     prev_i2_x = i2_x; prev_i2_y = i2_y;
   }
@@ -645,8 +660,11 @@ void displayHarmonicsScreenValues() {
      drawButton(10, 200, 90, 35, harmonicsSrcLabel);
      prev_harmonicsSrcLabel = harmonicsSrcLabel;
      updateHarmonicsYAxisLabels(); 
-     // 소스 변경 시 전체 다시 그리기 위해 초기화
-     for(int i=0; i<16; i++) prev_bar_heights[i] = -1;
+     // 소스 변경 시 전체 다시 그리기 위해 초기화 (그래프 및 텍스트)
+     for(int i=0; i<16; i++) {
+         prev_bar_heights[i] = -1;
+         prev_text_vals[i] = -1.0; // [Mod] 텍스트 갱신 강제화
+     }
   }
   
   String currRunLabel = isHarmonicsFrozen ? "RUN" : "HOLD";
@@ -831,6 +849,7 @@ void displaySettingsProtectValues() {
 
 void runRelayControl() {
   if (relay1_state != prev_r1_state || relay2_state != prev_r2_state || screenNeedsRedraw) {
+    // [Fix] 강제 OFF 로직 제거, 실제 변수 상태만 반영
     String r1_status = relay1_state ? "ON" : "OFF";
     String r2_status = relay2_state ? "ON" : "OFF";
     

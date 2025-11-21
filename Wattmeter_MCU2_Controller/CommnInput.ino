@@ -4,8 +4,9 @@
  * 버전: v215_DEBUG (WiFi Touch Logic Updated + Debugging)
  * 설명: 
  * - [Debug] 시리얼 모니터링 기능 추가 (MCU1 수신 데이터 및 로직 흐름 확인용)
- * - [Mod] 경고 해제(WARN: false) 시 화면 자동 복구 로직 추가
+ * - [Mod] 경고 해제(WARN: false) 시 화면 자동 복구 로직 비활성화 (수동 터치 해제 유도)
  * - [Fix] One-Shot Trigger 및 Debouncing 적용
+ * - [Mod] 상세 트립 메시지("T_TYPE", "T_RLY") 파싱 및 릴레이 상태 동기화 추가
  * ==============================================================================
  */
 
@@ -116,7 +117,28 @@ void checkSerialInput() {
      if (!warningActive) {
         Serial.println("[DEBUG] >> Warning Triggered! Resetting Settings & Switching Screen.");
         
-        warningMessage = rxJsonDoc["MSG"] | "WARNING!";
+        // [Mod] 상세 트립 정보 확인 및 메시지 설정
+        String t_type = rxJsonDoc["T_TYPE"] | "";
+        String t_rly = rxJsonDoc["T_RLY"] | "";
+
+        // [New] 트립 정보에 따른 릴레이 상태 강제 동기화
+        if (t_rly == "R1") {
+            relay1_state = false;
+        } else if (t_rly == "R2") {
+            relay2_state = true;
+        } else if (t_rly == "ALL") {
+            relay1_state = true;
+            relay2_state = true;
+        }
+
+        if (t_type.length() > 0 && t_rly.length() > 0) {
+           // 상세 정보가 있는 경우: "OVER I (R1)" 형식
+           warningMessage = t_type + " (" + t_rly + ")";
+        } else {
+           // 상세 정보가 없는 경우: 기존 방식 유지
+           warningMessage = rxJsonDoc["MSG"] | "WARNING!";
+        }
+
         warningActive = true;
 
         V_MULTIPLIER = DEFAULT_V_MULTIPLIER;
@@ -132,6 +154,7 @@ void checkSerialInput() {
         screenNeedsRedraw = true; 
      }
   } 
+  /* [Mod] 자동 화면 복구 비활성화 - 사용자가 터치하여 해제하도록 유도
   else {
      // 2. 경고 신호 해제 시 (OFF) - 화면 자동 복구 로직
      if (warningActive) {
@@ -143,6 +166,7 @@ void checkSerialInput() {
         screenNeedsRedraw = true;
      }
   }
+  */
 }
 
 // --- 설정 값 변경 헬퍼 (Calib Manual) ---
