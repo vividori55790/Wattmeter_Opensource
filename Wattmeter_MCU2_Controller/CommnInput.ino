@@ -612,6 +612,18 @@ void checkTouchInput() {
         setting_step_index = temp_setting_step_index;
         
         txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_CALIB"; txJsonDoc["V_MULT"] = V_MULTIPLIER; txJsonDoc["I_MULT"] = I_MULTIPLIER; serializeJson(txJsonDoc, Serial1); Serial1.println();
+        
+        // [New] Send Offsets if Auto Calib
+        if (previousScreen == SCREEN_SETTINGS_CALIB_AUTO) {
+           txJsonDoc.clear();
+           txJsonDoc["CMD"] = "SET_OFFSETS";
+           txJsonDoc["V_OFF"] = V_ADC_MIDPOINT_CALIB;
+           txJsonDoc["I_OFF"] = I_ADC_MIDPOINT_CALIB;
+           txJsonDoc["I1_OFF"] = I1_ADC_MIDPOINT_CALIB;
+           txJsonDoc["I2_OFF"] = I2_ADC_MIDPOINT_CALIB;
+           serializeJson(txJsonDoc, Serial1); Serial1.println();
+        }
+
         txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_PROTECT"; txJsonDoc["V_THR"] = VOLTAGE_THRESHOLD; serializeJson(txJsonDoc, Serial1); Serial1.println();
         txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_STEP"; txJsonDoc["IDX"] = setting_step_index; serializeJson(txJsonDoc, Serial1); Serial1.println();
         

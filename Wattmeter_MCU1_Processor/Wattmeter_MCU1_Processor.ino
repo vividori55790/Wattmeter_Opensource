@@ -47,6 +47,12 @@ float V_MULTIPLIER = 1.0;
 float I_MULTIPLIER = 1.0;
 float VOLTAGE_THRESHOLD = 240.0;
 
+// [New] Received ADC Midpoints from MCU2
+float V_ADC_MIDPOINT_RX = -1.0;
+float I_ADC_MIDPOINT_RX = -1.0;
+float I1_ADC_MIDPOINT_RX = -1.0;
+float I2_ADC_MIDPOINT_RX = -1.0;
+
 // --- Global Buffers ---
 uint16_t raw_v_buf[FFT_N];
 uint16_t raw_i_buf[FFT_N];
@@ -248,6 +254,13 @@ void checkSerialCommand() {
       if (cmd == "ACK_WARN") {
          warningActive = false;
       }
+      // [New] Receive Offsets
+      else if (cmd == "SET_OFFSETS") {
+         V_ADC_MIDPOINT_RX = rxJsonDoc["V_OFF"];
+         I_ADC_MIDPOINT_RX = rxJsonDoc["I_OFF"];
+         I1_ADC_MIDPOINT_RX = rxJsonDoc["I1_OFF"];
+         I2_ADC_MIDPOINT_RX = rxJsonDoc["I2_OFF"];
+      }
       else if (cmd == "REQ_DATA") { // [New] 데이터 요청 명령 처리
          sendMainData();
       }
@@ -408,6 +421,12 @@ void perform_unified_analysis() {
   double i_offset = i_sum / FFT_N;
   double i1_offset = i1_sum / FFT_N;
   double i2_offset = i2_sum / FFT_N;
+
+  // [New] Override Offsets with Received Values
+  if (V_ADC_MIDPOINT_RX != -1.0) v_offset = V_ADC_MIDPOINT_RX;
+  if (I_ADC_MIDPOINT_RX != -1.0) i_offset = I_ADC_MIDPOINT_RX;
+  if (I1_ADC_MIDPOINT_RX != -1.0) i1_offset = I1_ADC_MIDPOINT_RX;
+  if (I2_ADC_MIDPOINT_RX != -1.0) i2_offset = I2_ADC_MIDPOINT_RX;
 
   // Step 3: Integration & FFT Prep
   double sum_v_sq = 0; double sum_i_sq = 0; 
