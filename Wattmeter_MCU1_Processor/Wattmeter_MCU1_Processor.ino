@@ -128,7 +128,7 @@ void perform_unified_analysis();
 void calculateNewGains(float true_v, float true_i);
 void sendMainData();
 void checkSerialCommand();
-void runWaveformStreaming();
+// void runWaveformStreaming(); // [Mod] 사용하지 않아 제거됨
 void waitForVoltageZeroCross();
 // [Fix] Changed float32_t to float for standard compatibility
 float calculateTHD_FFT(double* mags, int fundamentalBin); 
@@ -189,7 +189,8 @@ void loop() {
 
   // Main Operation
   if (isWaveformStreaming) {
-    runWaveformStreaming();
+    // 이전에는 runWaveformStreaming()이 있었으나, 삭제됨.
+    // 이제 isWaveformStreaming이 true여도 아무것도 하지 않습니다.
   } else {
     if (millis() - lastDataSendTime >= 500) {
        lastDataSendTime = millis();
@@ -655,71 +656,6 @@ void performStartupCalibration() {
      if (avg_v > 1.0) {
         BASE_V_CALIB_RMS = BASE_V_CALIB_RMS * (218.9 / avg_v);
      }
-  }
-}
-
-void runWaveformStreaming() {
-  const int LAG_BUFFER_SIZE = 42; 
-  float v_lag_buffer[LAG_BUFFER_SIZE];
-  int buffer_head = 0;
-  bool buffer_filled = false;
-
-  if (waveformSyncMode == 1) {
-    waitForVoltageZeroCross();
-  }
-
-  unsigned long startTime = micros();
-  int sampleCount = 300; 
-
-  float effective_V_Calib = BASE_V_CALIB_RMS * V_MULTIPLIER;
-  float effective_I_Calib = BASE_I_CALIB_RMS * I_MULTIPLIER;
-  float effective_V_Offset = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
-  float effective_I_Offset = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
-
-  for (int i = 0; i < sampleCount; i++) {
-    if (i % 20 == 0 && Serial1.available()) {
-       String s = Serial1.peek() == '{' ? Serial1.readStringUntil('\n') : "";
-       if (s.indexOf("MODE\":0") != -1) {
-          isWaveformStreaming = false;
-          return;
-       }
-    }
-
-    int V_raw = analogRead(VOLTAGE_PIN);
-    int I_raw = analogRead(CURRENT_PIN);
-    int I1_raw = analogRead(CURRENT_PIN_LOAD1);
-    int I2_raw = analogRead(CURRENT_PIN_LOAD2);
-    
-    int V_ac_bits = V_raw - (int)V_ADC_MIDPOINT;
-    int I_ac_bits = I_raw - (int)I_ADC_MIDPOINT;
-    int I1_ac_bits = I1_raw - (int)I_ADC_MIDPOINT;
-    int I2_ac_bits = I2_raw - (int)I_ADC_MIDPOINT;
-
-    float v_inst = V_ac_bits * effective_V_Calib + effective_V_Offset;
-    float i_inst = I_ac_bits * effective_I_Calib - effective_I_Offset;
-    float i1_inst = I1_ac_bits * effective_I_Calib - effective_I_Offset;
-    float i2_inst = I2_ac_bits * effective_I_Calib - effective_I_Offset;
-
-    v_lag_buffer[buffer_head] = v_inst;
-    float v_lagged = v_lag_buffer[(buffer_head + 1) % LAG_BUFFER_SIZE];
-    buffer_head = (buffer_head + 1) % LAG_BUFFER_SIZE;
-    if (buffer_head == 0) buffer_filled = true;
-
-    if (waveformType == 0) { 
-       Serial1.print(v_inst); Serial1.print(","); Serial1.println(i_inst);
-    } 
-    else if (waveformType == 1) { 
-       float p_inst = v_inst * i_inst;
-       float q_inst = buffer_filled ? (v_lagged * i_inst) : 0.0;
-       Serial1.print(p_inst); Serial1.print(","); Serial1.println(q_inst);
-    } 
-    else { 
-       Serial1.print(i_inst); Serial1.print(","); 
-       Serial1.print(i1_inst); Serial1.print(","); 
-       Serial1.println(i2_inst);
-    }
-
-    while(micros() - startTime < (i + 1) * 100); 
   }
 }
 

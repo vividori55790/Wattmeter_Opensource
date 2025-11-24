@@ -10,6 +10,7 @@
  * - [Legacy] CALIB_AUTO 등은 기존 로직 유지
  * - [New] Timer Start/Stop 버튼 5초 이상 누름 시 설정값(0) 초기화 기능 추가
  * - [Fix] Timer 설정 값 변경 시 전체 화면 갱신(screenNeedsRedraw) 제거 -> 부분 갱신 유도
+ * - [Mod] BASE 교정 값 수신 로직 제거 (하드코딩으로 변경됨)
  * ==============================================================================
  */
 
@@ -74,6 +75,8 @@ void checkSerialInput() {
   
   thd_v_value = rxJsonDoc["THD_V"] | thd_v_value;
   thd_i_value = rxJsonDoc["THD_I"] | thd_i_value;
+  
+  // [Mod] Receive Base Calibration Values Removed (Now hardcoded in Controller)
   
   String hv = rxJsonDoc["H_V_STR"];
   String hi = rxJsonDoc["H_I_STR"];

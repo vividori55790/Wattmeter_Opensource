@@ -471,8 +471,13 @@ void runCombinedWaveformLoop() {
   static float p3_buf[PLOT_WIDTH];
   
   const int LAG_SIZE = 40;
+  
+  // [Prompt 3] 센서별 유효 승수 계산 업데이트
   float eff_V_mult = BASE_V_CALIB_RMS * V_MULTIPLIER;
-  float eff_I_mult = BASE_I_CALIB_RMS * I_MULTIPLIER;
+  float eff_I_mult_main = BASE_I_CALIB_RMS * I_MULTIPLIER;
+  float eff_I_mult_load1 = BASE_I1_CALIB_RMS * I_MULTIPLIER;
+  float eff_I_mult_load2 = BASE_I2_CALIB_RMS * I_MULTIPLIER;
+  
   float eff_V_off = BASE_V_OFFSET_ADJUST * V_MULTIPLIER;
   float eff_I_off = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
   
@@ -506,9 +511,11 @@ void runCombinedWaveformLoop() {
           int r_i2 = analogRead(PIN_ADC_I2);
           
           float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
-          float cur = (r_i - I_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
-          float cur1 = (r_i1 - I1_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
-          float cur2 = (r_i2 - I2_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
+          
+          // [Prompt 3] 센서별 유효 승수 적용
+          float cur = (r_i - I_ADC_MIDPOINT_CALIB) * eff_I_mult_main - eff_I_off;
+          float cur1 = (r_i1 - I1_ADC_MIDPOINT_CALIB) * eff_I_mult_load1 - eff_I_off;
+          float cur2 = (r_i2 - I2_ADC_MIDPOINT_CALIB) * eff_I_mult_load2 - eff_I_off;
 
           if (waveformPlotType == 0) { // V/I
              v_buf[i] = v;
@@ -570,9 +577,11 @@ void runCombinedWaveformLoop() {
         int r_i2 = analogRead(PIN_ADC_I2);
 
         float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
-        float cur = (r_i - I_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
-        float cur1 = (r_i1 - I1_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
-        float cur2 = (r_i2 - I2_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
+        
+        // [Prompt 3] 센서별 유효 승수 적용
+        float cur = (r_i - I_ADC_MIDPOINT_CALIB) * eff_I_mult_main - eff_I_off;
+        float cur1 = (r_i1 - I1_ADC_MIDPOINT_CALIB) * eff_I_mult_load1 - eff_I_off;
+        float cur2 = (r_i2 - I2_ADC_MIDPOINT_CALIB) * eff_I_mult_load2 - eff_I_off;
 
         if (waveformPlotType == 0) { 
            v_buf[i] = v;
@@ -876,9 +885,7 @@ void runAutoCalib() {
          prev_sel = calib_selection;
       }
   } else if (auto_calib_step == 5) {
-      float eff_V_mult = BASE_V_CALIB_RMS * V_MULTIPLIER;
-      float eff_I_mult = BASE_I_CALIB_RMS * I_MULTIPLIER;
-      // [Mod] static 제거 (전역 변수 사용)
+      // [Prompt 4] 불필요한 eff_mult 계산 제거 및 직접 RMS 값 표시
       printTFTValue(60, 80, V_rms, prev_disp_v, 1, COLOR_BLUE, " V");
       printTFTValue(60, 110, I_rms, prev_disp_i, 2, COLOR_ORANGE, " A");
       prev_disp_v = V_rms; prev_disp_i = I_rms;

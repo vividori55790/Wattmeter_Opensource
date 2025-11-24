@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v215 (WiFi Auto-Connect & Logic Fix) + Emergency Reset Added
+ * 버전: v216 (Hardcoded BASE Calib Values)
  * 설명: 
  * - [Mod] WiFi 연결 로직 전면 수정: 상태 머신 기반 (OFF -> WAIT -> ON)
  * - [Mod] 데이터 전송: 선택 옵션 제거, P(유효전력)값 고정 전송
@@ -10,6 +10,7 @@
  * - [New] 비상 화면 복구 기능: 10초 이상 터치 시 디스플레이 리셋
  * - [Mod] CREDIT 및 멤버 정보 화면 상태 추가 및 루프 처리
  * - [Mod] 릴레이 화면 진입 시 즉시 데이터 요청(REQ_DATA) 추가
+ * - [Mod] BASE 교정 값 하드코딩 (MCU1 값과 동일하게 설정, 통신 수신 제거)
  * ==============================================================================
  */
 
@@ -69,9 +70,13 @@ volatile bool screenNeedsRedraw = true;
 #define ADC_MAX_VAL (1 << ADC_RESOLUTION_BITS) 
 #define ADC_MIDPOINT (ADC_MAX_VAL / 2)
 
-// 물리 상수 (캘리브레이션 기본값)
-#define BASE_V_CALIB_RMS 0.1775
-#define BASE_I_CALIB_RMS 0.005
+// [Mod] MCU1과 동일한 BASE 교정 값 하드코딩 (통신 수신 제거)
+// 기존 #define 상수를 float 전역 변수로 대체하여 정밀도 확보
+float BASE_V_CALIB_RMS = 0.1744;
+float BASE_I_CALIB_RMS = 0.00316;
+float BASE_I1_CALIB_RMS = 0.0030998; // MCU1: BASE_I_CALIB_RMS1
+float BASE_I2_CALIB_RMS = 0.0030998; // MCU1: BASE_I_CALIB_RMS2
+
 #define BASE_V_OFFSET_ADJUST 0
 #define BASE_I_OFFSET_ADJUST 0
 
@@ -646,10 +651,12 @@ void calculateNewGains(float true_v, float true_i) {
   float I_rms_adc = sqrt((float)I_sq_sum / samples); 
   
   if (V_rms_adc > 1) {
-    V_MULTIPLIER = true_v / (V_rms_adc * BASE_V_CALIB_RMS);
+    // [Mod] Use hardcoded local variables instead of RX
+    V_MULTIPLIER = true_v / (V_rms_adc * BASE_V_CALIB_RMS); 
   }
   if (I_rms_adc > 1) {
-    I_MULTIPLIER = true_i / (I_rms_adc * BASE_I_CALIB_RMS);
+    // [Mod] Use hardcoded local variables instead of RX
+    I_MULTIPLIER = true_i / (I_rms_adc * BASE_I_CALIB_RMS); 
   }
   
   temp_V_MULTIPLIER = V_MULTIPLIER;
