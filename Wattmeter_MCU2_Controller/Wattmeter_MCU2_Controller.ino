@@ -72,8 +72,8 @@ volatile bool screenNeedsRedraw = true;
 // 물리 상수 (캘리브레이션 기본값)
 #define BASE_V_CALIB_RMS 0.1775
 #define BASE_I_CALIB_RMS 0.005
-#define BASE_V_OFFSET_ADJUST 7.1
-#define BASE_I_OFFSET_ADJUST 2.5546
+#define BASE_V_OFFSET_ADJUST 0
+#define BASE_I_OFFSET_ADJUST 0
 
 // ESP-01 핀 정의
 #define ESP_RX_PIN 2 
@@ -141,6 +141,8 @@ char calib_status_msg[50] = "";
 const int NUM_AUTOCALIB_INPUTS = 3;
 float V_ADC_MIDPOINT_CALIB = ADC_MIDPOINT;
 float I_ADC_MIDPOINT_CALIB = ADC_MIDPOINT;
+float I1_ADC_MIDPOINT_CALIB = ADC_MIDPOINT;
+float I2_ADC_MIDPOINT_CALIB = ADC_MIDPOINT;
 
 // --- EEPROM 프리셋 관련 ---
 struct Preset {
@@ -611,14 +613,19 @@ void loop() {
 
 void measureOffsets() {
   long v_sum = 0, i_sum = 0;
+  long i1_sum = 0, i2_sum = 0;
   int num_samples = 1000;
   for(int i=0; i<num_samples; i++) {
     v_sum += analogRead(PIN_ADC_V);
     i_sum += analogRead(PIN_ADC_I);
+    i1_sum += analogRead(PIN_ADC_I1);
+    i2_sum += analogRead(PIN_ADC_I2);
     delay(1);
   }
   V_ADC_MIDPOINT_CALIB = (float)v_sum / num_samples;
   I_ADC_MIDPOINT_CALIB = (float)i_sum / num_samples;
+  I1_ADC_MIDPOINT_CALIB = (float)i1_sum / num_samples;
+  I2_ADC_MIDPOINT_CALIB = (float)i2_sum / num_samples;
 }
 
 void calculateNewGains(float true_v, float true_i) {

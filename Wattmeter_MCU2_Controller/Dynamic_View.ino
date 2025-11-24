@@ -16,6 +16,10 @@
 extern bool prev_is_timer_active; 
 extern float prev_temp_true_v; // Controller에서 정의됨
 extern float prev_temp_true_i; // Controller에서 정의됨
+extern float V_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
+extern float I_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
+extern float I1_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
+extern float I2_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
 
 // [New] 전역으로 승격된 이전 값 저장 변수들 (화면 전환 시 초기화를 위함)
 // 메인 전력 화면
@@ -48,10 +52,14 @@ void printTFTValue(int x, int y, float value, float prev_value, int precision, u
   if (!screenNeedsRedraw && abs(value - prev_value) < (pow(10, -precision) / 2.0)) return; 
   
   char buffer[20];
-  tft.setTextColor(COLOR_BACKGROUND); 
-  tft.setCursor(x, y);
+  // --- [Mod] 이전 값 영역 지우기 시작 (Dynamic Clear) ---
+  int16_t x1, y1; uint16_t w, h;
   dtostrf(prev_value, 4, precision, buffer);
-  tft.print(buffer); tft.print(unit);
+  String prev_str = String(buffer) + unit;
+  tft.getTextBounds(prev_str, x, y, &x1, &y1, &w, &h);
+  tft.fillRect(x, y, w, h, COLOR_BACKGROUND);
+  // --- [Mod] 이전 값 영역 지우기 종료 ---
+  
   tft.setTextColor(color); 
   tft.setCursor(x, y);
   dtostrf(value, 4, precision, buffer);
@@ -64,10 +72,13 @@ void printTFTValue(int x, int y, int value, int prev_value, uint16_t color, Stri
   if (!screenNeedsRedraw && value == prev_value) return; 
   
   char buffer[20];
-  tft.setTextColor(COLOR_BACKGROUND); 
-  tft.setCursor(x, y);
+  // --- [Mod] 이전 값 영역 지우기 시작 (Dynamic Clear) ---
+  int16_t x1, y1; uint16_t w, h;
   sprintf(buffer, "%d%s", prev_value, unit.c_str());
-  tft.print(buffer);
+  String prev_str = String(buffer);
+  tft.getTextBounds(prev_str, x, y, &x1, &y1, &w, &h);
+  tft.fillRect(x, y, w, h, COLOR_BACKGROUND);
+  // --- [Mod] 이전 값 영역 지우기 종료 ---
   
   tft.setTextColor(color); 
   tft.setCursor(x, y);
@@ -80,9 +91,12 @@ void printTFTValue(int x, int y, int value, int prev_value, uint16_t color, Stri
 void printTFTValue(int x, int y, String value, String prev_value, uint16_t color) {
   if (!screenNeedsRedraw && value.equals(prev_value)) return; 
   
-  tft.setTextColor(COLOR_BACKGROUND); 
-  tft.setCursor(x, y);
-  tft.print(prev_value);
+  // --- [Mod] 이전 값 영역 지우기 시작 (Dynamic Clear) ---
+  int16_t x1, y1; uint16_t w, h;
+  tft.getTextBounds(prev_value, x, y, &x1, &y1, &w, &h);
+  tft.fillRect(x, y, w, h, COLOR_BACKGROUND);
+  // --- [Mod] 이전 값 영역 지우기 종료 ---
+  
   tft.setTextColor(color); 
   tft.setCursor(x, y); 
   tft.print(value);
@@ -208,6 +222,8 @@ void displayMainScreenValues() {
   char buffer[20];
   int col1_value_x = 60;
   int col2_value_x = 220; 
+  // [Mod] 텍스트 겹침 방지를 위해 지움 영역 너비를 충분히 확보
+  const int CLEAR_WIDTH = 110;
   int col_w_half = 90; 
   int col_w_half_wide = 100;
   
@@ -217,7 +233,7 @@ void displayMainScreenValues() {
   prev_disp_V_rms = V_rms;
   
   if (abs(I_rms - prev_disp_I_rms) > 0.001 || screenNeedsRedraw) {
-      tft.fillRect(col1_value_x, 65, col_w_half, 20, COLOR_BACKGROUND); 
+      tft.fillRect(col1_value_x, 65, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half -> CLEAR_WIDTH
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 65);
       if (I_rms < 1.0) { 
@@ -229,7 +245,7 @@ void displayMainScreenValues() {
   }
   
   if (abs(P_real - prev_disp_P_real) > 0.1 || screenNeedsRedraw) {
-      tft.fillRect(col1_value_x, 90, col_w_half, 20, COLOR_BACKGROUND); 
+      tft.fillRect(col1_value_x, 90, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half -> CLEAR_WIDTH
       tft.setTextColor(COLOR_DARKGREEN);
       tft.setCursor(col1_value_x, 90);
       if (P_real >= 1000.0) { 
@@ -244,7 +260,7 @@ void displayMainScreenValues() {
   prev_disp_PF = PF;
   
   if (abs(Q_reactive - prev_disp_Q_reactive) > 0.1 || screenNeedsRedraw) {
-      tft.fillRect(col1_value_x, 115, col_w_half, 20, COLOR_BACKGROUND); 
+      tft.fillRect(col1_value_x, 115, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half -> CLEAR_WIDTH
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 115);
       if (Q_reactive >= 1000.0) { 
@@ -256,7 +272,7 @@ void displayMainScreenValues() {
   }
 
   if (abs(I_rms_load1 - prev_disp_I_rms_load1) > 0.001 || screenNeedsRedraw) {
-      tft.fillRect(col2_value_x, 40, col_w_half_wide, 20, COLOR_BACKGROUND); 
+      tft.fillRect(col2_value_x, 40, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half_wide -> CLEAR_WIDTH
       tft.setTextColor(COLOR_RED);
       tft.setCursor(col2_value_x, 40); 
       if (I_rms_load1 < 1.0) { 
@@ -268,7 +284,7 @@ void displayMainScreenValues() {
   }
 
   if (abs(I_rms_load2 - prev_disp_I_rms_load2) > 0.001 || screenNeedsRedraw) {
-      tft.fillRect(col2_value_x, 65, col_w_half_wide, 20, COLOR_BACKGROUND); 
+      tft.fillRect(col2_value_x, 65, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half_wide -> CLEAR_WIDTH
       tft.setTextColor(COLOR_GREEN);
       tft.setCursor(col2_value_x, 65); 
       if (I_rms_load2 < 1.0) { 
@@ -280,7 +296,7 @@ void displayMainScreenValues() {
   }
 
   if (abs(S_apparent - prev_disp_S_apparent) > 0.1 || screenNeedsRedraw) {
-      tft.fillRect(col2_value_x, 90, col_w_half_wide, 20, COLOR_BACKGROUND); 
+      tft.fillRect(col2_value_x, 90, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half_wide -> CLEAR_WIDTH
       tft.setTextColor(COLOR_TEXT_PRIMARY);
       tft.setCursor(col2_value_x, 90); 
       if (S_apparent >= 1000.0) { 
@@ -461,7 +477,6 @@ void runCombinedWaveformLoop() {
   float eff_I_off = BASE_I_OFFSET_ADJUST * I_MULTIPLIER;
   
   int delay_us = WAVEFORM_DELAYS_US[waveformPeriodIndex];
-  int center = ADC_MIDPOINT;
   
   bool triggered = false;
 
@@ -475,7 +490,7 @@ void runCombinedWaveformLoop() {
       if (waveformPlotType == 1) {
           for(int k=0; k<LAG_SIZE; k++) {
               int r_v = analogRead(PIN_ADC_V);
-              float v = (r_v - center) * eff_V_mult + eff_V_off;
+              float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
               local_lag_buf[lag_head] = v;
               lag_head = (lag_head + 1) % LAG_SIZE;
               delayMicroseconds(delay_us);
@@ -490,10 +505,10 @@ void runCombinedWaveformLoop() {
           int r_i1 = analogRead(PIN_ADC_I1);
           int r_i2 = analogRead(PIN_ADC_I2);
           
-          float v = (r_v - center) * eff_V_mult + eff_V_off;
-          float cur = (r_i - center) * eff_I_mult - eff_I_off;
-          float cur1 = (r_i1 - center) * eff_I_mult - eff_I_off;
-          float cur2 = (r_i2 - center) * eff_I_mult - eff_I_off;
+          float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
+          float cur = (r_i - I_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
+          float cur1 = (r_i1 - I1_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
+          float cur2 = (r_i2 - I2_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
 
           if (waveformPlotType == 0) { // V/I
              v_buf[i] = v;
@@ -533,15 +548,15 @@ void runCombinedWaveformLoop() {
          checkTouchInput();
          if (screenNeedsRedraw) return;
          int raw_v = analogRead(PIN_ADC_V);
-         if (trig_state == 0) { if (raw_v < (center - hyst)) trig_state = 1; } 
-         else if (trig_state == 1) { if (raw_v > (center + hyst)) { triggered = true; break; } }
+         if (trig_state == 0) { if (raw_v < (V_ADC_MIDPOINT_CALIB - hyst)) trig_state = 1; } 
+         else if (trig_state == 1) { if (raw_v > (V_ADC_MIDPOINT_CALIB + hyst)) { triggered = true; break; } }
       }
 
       float local_lag_buf[LAG_SIZE];
       int lag_head = 0;
       for(int k=0; k<LAG_SIZE; k++) {
           int r_v = analogRead(PIN_ADC_V);
-          float v = (r_v - center) * eff_V_mult + eff_V_off;
+          float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
           local_lag_buf[lag_head] = v;
           lag_head = (lag_head + 1) % LAG_SIZE;
           delayMicroseconds(delay_us);
@@ -554,10 +569,10 @@ void runCombinedWaveformLoop() {
         int r_i1 = analogRead(PIN_ADC_I1);
         int r_i2 = analogRead(PIN_ADC_I2);
 
-        float v = (r_v - center) * eff_V_mult + eff_V_off;
-        float cur = (r_i - center) * eff_I_mult - eff_I_off;
-        float cur1 = (r_i1 - center) * eff_I_mult - eff_I_off;
-        float cur2 = (r_i2 - center) * eff_I_mult - eff_I_off;
+        float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
+        float cur = (r_i - I_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
+        float cur1 = (r_i1 - I1_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
+        float cur2 = (r_i2 - I2_ADC_MIDPOINT_CALIB) * eff_I_mult - eff_I_off;
 
         if (waveformPlotType == 0) { 
            v_buf[i] = v;

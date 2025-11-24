@@ -256,7 +256,7 @@ void checkTouchInput() {
   
   static bool prev_touched_flag = false;
 
-  // [Legacy] CALIB_AUTO 등에서 사용하는 롱 프레스용 변수 유지
+  // [Legacy] Long Press Logic (CALIB_AUTO를 위해 유지)
   static unsigned long touchDownTime = 0;       
   static bool isAdjustingValue = false;        
   static bool repeatDirection = false;         
@@ -316,7 +316,7 @@ void checkTouchInput() {
       isHarmonicsFrozen = false;
       
       if (currentScreen == SCREEN_SETTINGS_CALIB_MENU || currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
-        if ((currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) && settingsChanged) { 
+        if ((currentScreen == SCREEN_SETTINGS_CALIB_MANUAL) && settingsChanged) { // AUTO 화면 뒤로가기 시 저장/버리기 팝업 비활성화 [User Request]
            previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE;
         } else if (currentScreen == SCREEN_SETTINGS_CALIB_MENU) {
            currentScreen = SCREEN_SETTINGS; 

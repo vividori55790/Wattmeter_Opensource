@@ -271,9 +271,10 @@ void displayCreditMember1Static() {
   tft.println("MEMBER 1");
   drawBackButton();
   
-  tft.setCursor(60, 100); 
+  // [Mod] Updated Text for Member 1
   tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.print("Information for Member 1");
+  tft.setCursor(60, 90); tft.print("PARK RAEWON (Leader)");
+  tft.setCursor(60, 115); tft.print("Couldnt be better.");
 }
 
 void displayCreditMember2Static() {
@@ -283,9 +284,10 @@ void displayCreditMember2Static() {
   tft.println("MEMBER 2");
   drawBackButton();
   
-  tft.setCursor(60, 100); 
+  // [Mod] Updated Text for Member 2
   tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.print("Information for Member 2");
+  tft.setCursor(60, 90); tft.print("PARK YESEONG");
+  tft.setCursor(60, 115); tft.print("Extraordinary claims require extraordinary evidence.");
 }
 
 void displayCreditMember3Static() {
@@ -295,9 +297,10 @@ void displayCreditMember3Static() {
   tft.println("MEMBER 3");
   drawBackButton();
   
-  tft.setCursor(60, 100); 
+  // [Mod] Updated Text for Member 3
   tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.print("Information for Member 3");
+  tft.setCursor(60, 90); tft.print("JOO HWIJAE");
+  tft.setCursor(60, 115); tft.print("Butterflysoup.");
 }
 
 void displaySettingsNetworkStatic() {
