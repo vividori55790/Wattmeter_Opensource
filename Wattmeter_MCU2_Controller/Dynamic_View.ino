@@ -9,6 +9,7 @@
  * - [Mod] 고조파 소스 변경 시 텍스트 리스트 강제 갱신 로직 추가
  * - [Mod] 페이서 다이어그램: 전체 삭제 -> 그리드 복구 -> 길이순(긴->짧은) 정렬 그리기 적용
  * - [Fix] Auto Calibration 재진입 시 값 갱신 안 되는 오류 수정 (resetViewStates 초기화 추가)
+ * - [Fix] P/Q Waveform Stability (Continuous Mode) - 전역 버퍼 사용 및 초기화 로직
  * ==============================================================================
  */
 
@@ -20,6 +21,11 @@ extern float V_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
 extern float I_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
 extern float I1_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
 extern float I2_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
+
+// [FIX] P/Q Waveform Stability Fix Externs
+extern float P_Q_LAG_BUFFER[];
+extern int P_Q_LAG_HEAD;
+extern bool IS_LAG_BUFFER_INIT;
 
 // [New] 전역으로 승격된 이전 값 저장 변수들 (화면 전환 시 초기화를 위함)
 // 메인 전력 화면
@@ -123,6 +129,9 @@ void resetViewStates() {
     prev_phase_load1_deg = -999.0;
     prev_phase_load2_deg = -999.0;
     
+    // [New Fix] P/Q 버퍼 초기화 플래그 리셋
+    IS_LAG_BUFFER_INIT = false;
+
     // [Fix] 페이서 작도(선) 좌표 초기화 (강제 갱신 유도)
     prev_v_x = -1; prev_v_y = -1;
     prev_im_x = -1; prev_im_y = -1;
@@ -498,17 +507,24 @@ void runCombinedWaveformLoop() {
   // 1. 샘플링 (Sampling) 영역
   // ============================================================
   if (waveformTriggerMode == 0) { // Cont. Mode
-      float local_lag_buf[lag_size];
-      int lag_head = 0;
-
-      if (waveformPlotType == 1) {
+      // FIX: 지역 변수 선언 제거 (local_lag_buf, lag_head)
+    
+      // [FIX] P/Q 모드이면서 버퍼가 초기화되지 않았을 경우에만 Pre-fill 실행
+      if (waveformPlotType == 1 && !IS_LAG_BUFFER_INIT) {
+          P_Q_LAG_HEAD = 0; // [FIX] Use Global Head and reset
           for(int k=0; k<lag_size; k++) {
               int r_v = analogRead(PIN_ADC_V);
               float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
-              local_lag_buf[lag_head] = v;
-              lag_head = (lag_head + 1) % lag_size;
+              P_Q_LAG_BUFFER[P_Q_LAG_HEAD] = v; // [FIX] Use Global Buffer
+              P_Q_LAG_HEAD = (P_Q_LAG_HEAD + 1) % lag_size; // [FIX] Use Global Head
               delayMicroseconds(delay_us);
           }
+          IS_LAG_BUFFER_INIT = true; // [FIX] Set init flag
+      }
+    
+      // [New] P/Q 모드가 아닐 경우, 다음 진입을 위해 플래그 리셋
+      if (waveformPlotType != 1) {
+          IS_LAG_BUFFER_INIT = false;
       }
 
       for (int i = 0; i < PLOT_WIDTH; i++) {
@@ -534,10 +550,11 @@ void runCombinedWaveformLoop() {
              float p = v * cur;
              v_buf[i] = p; 
              
-             local_lag_buf[lag_head] = v;
-             int lag_read_idx = (lag_head + 1) % lag_size;
-             float v_lag = local_lag_buf[lag_read_idx];
-             lag_head = lag_read_idx;
+             // [FIX] Use Global Static Buffer
+             P_Q_LAG_BUFFER[P_Q_LAG_HEAD] = v;
+             int lag_read_idx = (P_Q_LAG_HEAD + 1) % lag_size;
+             float v_lag = P_Q_LAG_BUFFER[lag_read_idx];
+             P_Q_LAG_HEAD = lag_read_idx;
              
              float q = v_lag * cur;
              p2_buf[i] = q;

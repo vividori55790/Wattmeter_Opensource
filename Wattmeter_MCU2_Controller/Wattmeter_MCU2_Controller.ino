@@ -11,6 +11,7 @@
  * - [Mod] CREDIT 및 멤버 정보 화면 상태 추가 및 루프 처리
  * - [Mod] 릴레이 화면 진입 시 즉시 데이터 요청(REQ_DATA) 추가
  * - [Mod] BASE 교정 값 하드코딩 (MCU1 값과 동일하게 설정, 통신 수신 제거)
+ * - [Fix] P/Q 파형 안정화를 위한 전역 정적 버퍼 추가 (Continuous Mode Fix)
  * ==============================================================================
  */
 
@@ -234,6 +235,13 @@ const float P_RANGES[NUM_P_RANGES] = {200.0, 500.0, 1000.0, 2000.0};
 float plot1_axis_max = V_RANGES[NUM_V_RANGES-1]; 
 float plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; 
 float plot3_axis_max = I_RANGES[NUM_I_RANGES-1]; 
+
+// [FIX] P/Q 파형 안정화를 위한 전역 정적 버퍼 추가
+#define MAX_LAG_SIZE 64 // lag_size의 최댓값(약 42)을 고려한 안전한 크기
+float P_Q_LAG_BUFFER[MAX_LAG_SIZE]; 
+int P_Q_LAG_HEAD = 0;
+bool IS_LAG_BUFFER_INIT = false;
+// [FIX] End Addition
 
 int waveformPlotType = 0; 
 const char* WAVEFORM_TYPE_LABELS[] = {"V/I", "P/Q", "I/I1/I2"};
