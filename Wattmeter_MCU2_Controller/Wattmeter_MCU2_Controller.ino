@@ -252,7 +252,7 @@ int waveformPeriodIndex = 1;
 const char* WAVEFORM_PERIOD_LABELS[] = {"Short", "Mid", "Long"};
 
 // [Mod] 샘플링 간격 조정
-const int WAVEFORM_DELAYS_US[] = {100, 200, 400}; 
+const int WAVEFORM_DELAYS_US[] = {150, 250, 400}; 
 
 #define PHASOR_CX 235
 #define PHASOR_CY 115
