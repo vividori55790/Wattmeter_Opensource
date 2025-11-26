@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v218 (Auto Calib Refresh Fix)
+ * 버전: v219 (Fix Graph Scale Mismatch)
  * 설명: 
  * - [Fix] 릴레이 상태 표시: 변수 상태를 그대로 반영하도록 로직 단순화
  * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
@@ -10,6 +10,7 @@
  * - [Mod] 페이서 다이어그램: 전체 삭제 -> 그리드 복구 -> 길이순(긴->짧은) 정렬 그리기 적용
  * - [Fix] Auto Calibration 재진입 시 값 갱신 안 되는 오류 수정 (resetViewStates 초기화 추가)
  * - [Fix] P/Q Waveform Stability (Continuous Mode) - 전역 버퍼 사용 및 초기화 로직
+ * - [Fix] Waveform Screen Entry Scale Mismatch: Auto-ranging indices globalized & reset on entry
  * ==============================================================================
  */
 
@@ -26,6 +27,12 @@ extern float I2_ADC_MIDPOINT_CALIB; // [Mod] 추가된 외부 변수 참조
 extern float P_Q_LAG_BUFFER[];
 extern int P_Q_LAG_HEAD;
 extern bool IS_LAG_BUFFER_INIT;
+
+// [New] Globalized Auto-Ranging Indices (moved from runCombinedWaveformLoop)
+// 초기값은 안전하게 0으로 설정하며, 실제 초기화는 resetViewStates()에서 수행됩니다.
+int range_idx_v = 0; 
+int range_idx_i = 0; 
+int range_idx_p = 0; 
 
 // [New] 전역으로 승격된 이전 값 저장 변수들 (화면 전환 시 초기화를 위함)
 // 메인 전력 화면
@@ -169,6 +176,11 @@ void resetViewStates() {
     // 릴레이 컨트롤 초기화
     prev_r1_state = !relay1_state; // 강제 불일치 유도
     prev_r2_state = !relay2_state;
+
+    // [Fix] Waveform Scale Reset (Start at Max Range to match Labels)
+    range_idx_v = NUM_V_RANGES - 1;
+    range_idx_i = NUM_I_RANGES - 1;
+    range_idx_p = NUM_P_RANGES - 1;
 }
 
 // --- [Mod] 네트워크 설정 화면 동적 갱신 ---
@@ -643,9 +655,7 @@ void runCombinedWaveformLoop() {
      if (waveformPlotType == 2 && abs(p3_buf[i]) > max_val_p3) max_val_p3 = abs(p3_buf[i]);
   }
 
-  static int range_idx_v = NUM_V_RANGES - 1;
-  static int range_idx_i = NUM_I_RANGES - 1;
-  static int range_idx_p = NUM_P_RANGES - 1;
+  // [Fix] Removed static declaration, using global range indices
   bool rangeChanged = false;
 
   auto updateRange = [&](int &idx, float peak, const float* ranges, int count) {
