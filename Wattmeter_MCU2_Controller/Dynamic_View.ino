@@ -470,7 +470,8 @@ void runCombinedWaveformLoop() {
   static float p2_buf[PLOT_WIDTH];
   static float p3_buf[PLOT_WIDTH];
   
-  const int LAG_SIZE = 40;
+  // 60Hz에서 90도 위상 지연에 필요한 시간 (T/4 = 16666.67 / 4)
+  const float TARGET_90DEG_DELAY_US = 4166.67f;
   
   // [Prompt 3] 센서별 유효 승수 계산 업데이트
   float eff_V_mult = BASE_V_CALIB_RMS * V_MULTIPLIER;
@@ -483,21 +484,29 @@ void runCombinedWaveformLoop() {
   
   int delay_us = WAVEFORM_DELAYS_US[waveformPeriodIndex];
   
+  // [새로운 Q 파형 LAG_SIZE 계산]
+  int lag_size = 0;
+  if (delay_us > 0) {
+    lag_size = round(TARGET_90DEG_DELAY_US / (float)delay_us);
+  }
+  if (lag_size < 1) lag_size = 1; // 최소 1개 샘플
+  // [Q 파형 LAG_SIZE 계산 끝]
+
   bool triggered = false;
 
   // ============================================================
   // 1. 샘플링 (Sampling) 영역
   // ============================================================
   if (waveformTriggerMode == 0) { // Cont. Mode
-      float local_lag_buf[LAG_SIZE];
+      float local_lag_buf[lag_size];
       int lag_head = 0;
 
       if (waveformPlotType == 1) {
-          for(int k=0; k<LAG_SIZE; k++) {
+          for(int k=0; k<lag_size; k++) {
               int r_v = analogRead(PIN_ADC_V);
               float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
               local_lag_buf[lag_head] = v;
-              lag_head = (lag_head + 1) % LAG_SIZE;
+              lag_head = (lag_head + 1) % lag_size;
               delayMicroseconds(delay_us);
           }
       }
@@ -526,7 +535,7 @@ void runCombinedWaveformLoop() {
              v_buf[i] = p; 
              
              local_lag_buf[lag_head] = v;
-             int lag_read_idx = (lag_head + 1) % LAG_SIZE;
+             int lag_read_idx = (lag_head + 1) % lag_size;
              float v_lag = local_lag_buf[lag_read_idx];
              lag_head = lag_read_idx;
              
@@ -559,13 +568,13 @@ void runCombinedWaveformLoop() {
          else if (trig_state == 1) { if (raw_v > (V_ADC_MIDPOINT_CALIB + hyst)) { triggered = true; break; } }
       }
 
-      float local_lag_buf[LAG_SIZE];
+      float local_lag_buf[lag_size];
       int lag_head = 0;
-      for(int k=0; k<LAG_SIZE; k++) {
+      for(int k=0; k<lag_size; k++) {
           int r_v = analogRead(PIN_ADC_V);
           float v = (r_v - V_ADC_MIDPOINT_CALIB) * eff_V_mult + eff_V_off;
           local_lag_buf[lag_head] = v;
-          lag_head = (lag_head + 1) % LAG_SIZE;
+          lag_head = (lag_head + 1) % lag_size;
           delayMicroseconds(delay_us);
       }
       
@@ -592,7 +601,7 @@ void runCombinedWaveformLoop() {
            v_buf[i] = p; 
            
            local_lag_buf[lag_head] = v;
-           int lag_read_idx = (lag_head + 1) % LAG_SIZE;
+           int lag_read_idx = (lag_head + 1) % lag_size;
            float v_lag = local_lag_buf[lag_read_idx];
            lag_head = lag_read_idx;
            
