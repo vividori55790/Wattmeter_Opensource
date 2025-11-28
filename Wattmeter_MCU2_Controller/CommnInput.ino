@@ -458,7 +458,7 @@ void checkTouchInput() {
       if (p.x >= 15 && p.x <= 155 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_SETTINGS_THEME; screenNeedsRedraw = true; } 
       else if (p.x >= 165 && p.x <= 305 && p.y >= 45 && p.y <= 95) { currentScreen = SCREEN_SETTINGS_PRESETS; screenNeedsRedraw = true; } 
       else if (p.x >= 15 && p.x <= 155 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_SETTINGS_RESET; screenNeedsRedraw = true; }
-      else if (p.x >= 165 && p.x <= 305 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_SETTINGS_CREDIT; screenNeedsRedraw = true; }
+      else if (p.x >= 165 && p.x <= 305 && p.y >= 105 && p.y <= 155) { currentScreen = SCREEN_CREDIT_SPLASH; screenNeedsRedraw = true; }
       break;
       
     case SCREEN_SETTINGS_PRESETS: 

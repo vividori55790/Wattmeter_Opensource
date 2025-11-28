@@ -8,6 +8,7 @@
  * - [Mod] Legend Color Fix 유지
  * - [Mod] Settings UI 변경 (5버튼 배열) 및 Advanced UI 변경 (2x2 그리드)
  * - [New] Credit Splash Screen & Member Profile Card UI Design
+ * - [Fix] Profile Card Comment Multi-line Center Alignment
  * ==============================================================================
  */
 
@@ -360,15 +361,40 @@ void drawProfileCard(String title, uint16_t themeColor, String name, String subT
   // 3. Comment (Small/Italic feel, Secondary Text)
   tft.setTextColor(COLOR_TEXT_SECONDARY);
   tft.setTextSize(1);
-  // Simple word wrap or just centering (assuming short quotes)
-  tft.getTextBounds(comment, 0, 0, &x1, &y1, &w, &h);
-  if (w > cardW - 20) {
-     // Very simple wrap logic if needed, but for now assuming it fits or simple split
-     tft.setCursor(cardX + 10, cardY + 120);
-     tft.print(comment);
+  
+  int commentY = cardY + 120; 
+  int lineHeight = 10; 
+
+  int startIdx = 0;
+  int newlineIdx = comment.indexOf('\n');
+
+  if (newlineIdx == -1) {
+    // Single line case
+    tft.getTextBounds(comment, 0, 0, &x1, &y1, &w, &h);
+    tft.setCursor(centerX - w / 2, commentY);
+    tft.print(comment);
   } else {
-     tft.setCursor(centerX - w / 2, cardY + 120);
-     tft.print(comment);
+    // Multi-line processing loop
+    while (true) {
+      String line;
+      if (newlineIdx != -1) {
+        line = comment.substring(startIdx, newlineIdx);
+      } else {
+        line = comment.substring(startIdx); 
+      }
+      
+      // Calculate width for individual line center alignment
+      tft.getTextBounds(line, 0, 0, &x1, &y1, &w, &h);
+      tft.setCursor(centerX - w / 2, commentY);
+      tft.print(line);
+      
+      commentY += lineHeight; 
+
+      if (newlineIdx == -1) break; 
+
+      startIdx = newlineIdx + 1;
+      newlineIdx = comment.indexOf('\n', startIdx);
+    }
   }
 }
 

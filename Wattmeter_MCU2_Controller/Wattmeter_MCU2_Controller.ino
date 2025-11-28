@@ -45,6 +45,7 @@ enum ScreenState {
   SCREEN_SETTINGS_TIMER,    
   SCREEN_CONFIRM_SAVE,      
   SCREEN_WARNING,
+  SCREEN_CREDIT_SPLASH, // [New] 스플래시 화면 상태 추가
   SCREEN_SETTINGS_CREDIT,
   SCREEN_CREDIT_MEMBER_1,
   SCREEN_CREDIT_MEMBER_2,
@@ -326,6 +327,7 @@ void displaySettingsCalibManualStatic();
 void displayAutoCalibStatic();           
 void displaySettingsProtectStatic();
 void displayRelayControlStatic();
+void displayCreditSplashStatic(); // [New] 스플래시 함수 프로토타입 (Static_View에 있다고 가정)
 void displaySettingsCreditStatic();
 void displayCreditMember1Static();
 void displayCreditMember2Static();
@@ -598,6 +600,7 @@ void loop() {
           break;
         case SCREEN_CONFIRM_SAVE: displayConfirmSaveStatic(); break;
         case SCREEN_WARNING: break;
+        case SCREEN_CREDIT_SPLASH: displayCreditSplashStatic(); break; // [New] 스플래시 화면 호출 추가
         case SCREEN_SETTINGS_CREDIT: displaySettingsCreditStatic(); break;
         case SCREEN_CREDIT_MEMBER_1: displayCreditMember1Static(); break;
         case SCREEN_CREDIT_MEMBER_2: displayCreditMember2Static(); break;
