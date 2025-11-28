@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v216 (Hardcoded BASE Calib Values)
+ * 버전: v216_Mod_Opening (Splash Screen Added)
  * 설명: 
  * - [Mod] WiFi 연결 로직 전면 수정: 상태 머신 기반 (OFF -> WAIT -> ON)
  * - [Mod] 데이터 전송: 선택 옵션 제거, P(유효전력)값 고정 전송
@@ -12,6 +12,7 @@
  * - [Mod] 릴레이 화면 진입 시 즉시 데이터 요청(REQ_DATA) 추가
  * - [Mod] BASE 교정 값 하드코딩 (MCU1 값과 동일하게 설정, 통신 수신 제거)
  * - [Fix] P/Q 파형 안정화를 위한 전역 정적 버퍼 추가 (Continuous Mode Fix)
+ * - [New] 부팅 시 오프닝 화면(SCREEN_OPENING) 추가 및 3초 대기 로직 적용
  * ==============================================================================
  */
 
@@ -26,6 +27,7 @@
 
 // --- 화면 상태 정의 ---
 enum ScreenState {
+  SCREEN_OPENING,           // [New] 오프닝 화면 상태 추가 (맨 처음)
   SCREEN_HOME,              
   SCREEN_MAIN_POWER,
   SCREEN_PHASE_DIFFERENCE,
@@ -51,7 +53,8 @@ enum ScreenState {
   SCREEN_CREDIT_MEMBER_2,
   SCREEN_CREDIT_MEMBER_3
 };
-volatile ScreenState currentScreen = SCREEN_HOME; 
+// [Mod] 초기 상태를 SCREEN_OPENING으로 변경
+volatile ScreenState currentScreen = SCREEN_OPENING; 
 volatile ScreenState previousScreen = SCREEN_HOME; 
 volatile bool screenNeedsRedraw = true;
 
@@ -339,6 +342,7 @@ void displayPresetScreenStatic();
 void displaySettingsTimerStatic();
 void displayConfirmSaveStatic();
 void displayWarningScreenStatic();
+void displayOpeningScreen(); // [New] 오프닝 화면 함수 프로토타입 추가
 
 void displayMainScreenValues();
 void displayPhaseScreenValues();
@@ -563,6 +567,13 @@ void loop() {
       displayWarningScreenStatic(); 
     } else { 
       switch(currentScreen) {
+        case SCREEN_OPENING: // [New] 오프닝 화면 로직
+          displayOpeningScreen(); 
+          delay(3000); 
+          currentScreen = SCREEN_HOME; 
+          screenNeedsRedraw = true; 
+          return; // 중요: 아래 screenNeedsRedraw = false; 실행을 막기 위해 loop() 탈출
+
         case SCREEN_HOME: displayHomeScreenStatic(); break;
         case SCREEN_MAIN_POWER: displayMainScreenStatic(); break;
         case SCREEN_PHASE_DIFFERENCE: displayPhaseScreenStatic(); break;

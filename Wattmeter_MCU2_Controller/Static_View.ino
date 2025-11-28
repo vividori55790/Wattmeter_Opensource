@@ -13,7 +13,7 @@
  */
 
 // 광운대학교 상징색 (Deep Red/Burgundy) 정의
-#define COLOR_KW_BURGUNDY 0x8000 
+#define COLOR_KW_BURGUNDY 0x7106 
 
 void setTheme() {
   if (isDarkMode) {
@@ -688,4 +688,51 @@ void drawWaveformGridAndLabels() {
      tft.setCursor(220, 35); tft.setTextColor(COLOR_ORANGE); tft.print("I1 ");
      tft.setCursor(245, 35); tft.setTextColor(COLOR_RED); tft.print("I2");
   }
+}
+
+// [New] 오프닝 화면 그리기 함수 (로고 + 텍스트)
+void displayOpeningScreen() {
+  // 1. 전체 배경 흰색 초기화
+  tft.fillScreen(ILI9341_WHITE);
+
+  int cx = SCREEN_WIDTH / 2;
+  int cy = SCREEN_HEIGHT / 2 - 20; // 로고 중심 (하단 텍스트 공간 확보를 위해 약간 위로)
+
+  // 2. 파란색 두꺼운 원 그리기 (Blue Ring)
+  // 바깥 원(파랑) - 안쪽 원(흰색) = 링 효과
+  tft.fillCircle(cx, cy, 60, COLOR_BLUE);
+  tft.fillCircle(cx, cy, 48, ILI9341_WHITE);
+
+  // 3. 번개 모양 그리기 (중앙, 파란색)
+  // 두 개의 삼각형을 이어 붙여 번개 모양(Z형태) 구현
+  // 좌표는 cx, cy 기준으로 미세 조정하여 역동적인 느낌 부여
+  // 상단 삼각형 (우상향에서 중앙으로)
+  tft.fillTriangle(cx + 10, cy - 40, cx - 15, cy + 5, cx + 5, cy + 5, COLOR_BLUE);
+  // 하단 삼각형 (중앙에서 좌하향으로)
+  tft.fillTriangle(cx - 10, cy + 40, cx + 15, cy - 5, cx - 5, cy - 5, COLOR_BLUE);
+
+  // 4. "K", "W" 텍스트 그리기 (원 내부 좌우 배치)
+  tft.setTextColor(COLOR_BLUE);
+  tft.setTextSize(4); // 크고 굵게
+  
+  // "K" - 원의 왼쪽 부분
+  tft.setCursor(cx - 50, cy - 15);
+  tft.print("K");
+
+  // "W" - 원의 오른쪽 부분
+  tft.setCursor(cx + 25, cy - 15);
+  tft.print("W");
+
+  // 5. 하단 "WATTMETER" 텍스트
+  tft.setTextColor(ILI9341_BLACK);
+  tft.setTextSize(3); // 강조된 크기
+  
+  String title = "WATTMETER";
+  int16_t x1, y1;
+  uint16_t w, h;
+  // 텍스트 너비 계산하여 중앙 정렬
+  tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  
+  tft.setCursor((SCREEN_WIDTH - w) / 2, cy + 75);
+  tft.print(title);
 }
