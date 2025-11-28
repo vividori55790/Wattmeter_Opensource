@@ -368,7 +368,8 @@ void sendMainData() {
   double v_fund = hypot(vReal[FUNDALMENTAL_BIN], vImag[FUNDALMENTAL_BIN]);
   double i_fund = hypot(iReal[FUNDALMENTAL_BIN], iImag[FUNDALMENTAL_BIN]);
   
-  for (int k = 1; k <= MAX_HARMONIC; k++) { 
+  // [Mod] Odd Harmonics Only (1, 3, 5 ... 15) -> Step of 2
+  for (int k = 1; k <= MAX_HARMONIC; k += 2) { 
       if (k > 1) { harmonics_v_str += ","; harmonics_i_str += ","; }
       int bin = FUNDALMENTAL_BIN * k;
       

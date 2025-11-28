@@ -1,14 +1,18 @@
 /*
  * ==============================================================================
  * 파일명: 2. Static_View.ino
- * 버전: v214 (Harmonics UI Improved)
+ * 버전: v214_Mod_UI (Credit UI Improved)
  * 설명: 
  * - [Mod] Harmonics Screen: 그래프 영역 최적화 및 Y축 단위 즉시 반영 구조
  * - [Mod] X축 라벨: 1, 3, 5 ... 15 홀수 차수 표시
  * - [Mod] Legend Color Fix 유지
  * - [Mod] Settings UI 변경 (5버튼 배열) 및 Advanced UI 변경 (2x2 그리드)
+ * - [New] Credit Splash Screen & Member Profile Card UI Design
  * ==============================================================================
  */
+
+// 광운대학교 상징색 (Deep Red/Burgundy) 정의
+#define COLOR_KW_BURGUNDY 0x8000 
 
 void setTheme() {
   if (isDarkMode) {
@@ -68,10 +72,33 @@ void drawBackButton() {
 }
 
 void drawButton(int x, int y, int w, int h, String text) {
-  tft.fillRoundRect(x, y, w, h, 8, COLOR_BUTTON); 
+  // 1. 애니메이션 효과 (중앙에서 확장)
+  int centerX = x + w / 2;
+  int centerY = y + h / 2;
+  int steps = 4; // 애니메이션 단계 (숫자가 클수록 부드럽지만 느림)
+
+  for (int i = 1; i <= steps; i++) {
+    int cw = (w * i) / steps;
+    int ch = (h * i) / steps;
+    
+    // 확장되는 테두리 그리기 (버튼 외곽선 색상 사용)
+    tft.drawRoundRect(centerX - cw / 2, centerY - ch / 2, cw, ch, 8, COLOR_BUTTON_OUTLINE);
+    
+    delay(10); // 애니메이션 속도 조절 (너무 느리면 반응성 저하)
+    
+    if (i < steps) {
+      // 다음 프레임을 위해 이전 테두리 지우기 (현재 배경색으로 덮어쓰기)
+      tft.drawRoundRect(centerX - cw / 2, centerY - ch / 2, cw, ch, 8, COLOR_BACKGROUND);
+    }
+  }
+
+  // 2. 최종 버튼 그리기 (기존 로직)
+  tft.fillRoundRect(x, y, w, h, 8, COLOR_BUTTON);
   tft.drawRoundRect(x, y, w, h, 8, COLOR_BUTTON_OUTLINE); 
+  
   tft.setTextColor(COLOR_BUTTON_TEXT); 
   tft.setTextSize(2);
+  
   int16_t x1, y1;
   uint16_t w1, h1;
   tft.getTextBounds(text, 0, 0, &x1, &y1, &w1, &h1);
@@ -250,6 +277,30 @@ void displaySettingsScreenStatic() {
   drawButton(170, 170, 130, 40, "ADVANCED");
 }
 
+// --- [New] Credit Splash Screen ---
+void displayCreditSplashStatic() {
+  // 1. Background Fill with KW Burgundy
+  tft.fillScreen(COLOR_KW_BURGUNDY);
+  
+  // 2. Draw University Name
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(3);
+  
+  String title = "KWANGWOON UNIV.";
+  int16_t x1, y1;
+  uint16_t w, h;
+  tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  
+  // Center alignment
+  tft.setCursor((SCREEN_WIDTH - w) / 2, (SCREEN_HEIGHT - h) / 2);
+  tft.print(title);
+  
+  // 3. Auto-transition logic
+  delay(2000); // 2 seconds delay
+  currentScreen = SCREEN_SETTINGS_CREDIT;
+  screenNeedsRedraw = true;
+}
+
 // --- [New] Credit Screen & Sub Screens ---
 void displaySettingsCreditStatic() {
   tft.setCursor(65, 10);
@@ -264,43 +315,91 @@ void displaySettingsCreditStatic() {
   drawButton(20, 170, 280, 40, "MEMBER 3");
 }
 
-void displayCreditMember1Static() {
+// --- Helper for Profile Card ---
+void drawProfileCard(String title, uint16_t themeColor, String name, String subTitle, String comment) {
+  // Title Header
   tft.setCursor(65, 10);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.setTextSize(2);
-  tft.println("MEMBER 1");
+  tft.println(title);
   drawBackButton();
-  
-  // [Mod] Updated Text for Member 1
-  tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.setCursor(60, 90); tft.print("PARK RAEWON (Leader)");
-  tft.setCursor(60, 115); tft.print("Couldnt be better.");
+
+  // Card Dimension
+  int cardX = 30;
+  int cardY = 50;
+  int cardW = 260;
+  int cardH = 160;
+
+  // Draw Card Border
+  tft.drawRoundRect(cardX, cardY, cardW, cardH, 15, themeColor);
+  tft.drawRoundRect(cardX+1, cardY+1, cardW-2, cardH-2, 15, themeColor); // Double Border for effect
+
+  // Calculate Center for Text
+  int16_t x1, y1; uint16_t w, h;
+  int centerX = cardX + cardW / 2;
+
+  // 1. Name (Large, Theme Color)
+  tft.setTextColor(themeColor);
+  tft.setTextSize(3); // Large Font
+  tft.getTextBounds(name, 0, 0, &x1, &y1, &w, &h);
+  tft.setCursor(centerX - w / 2, cardY + 35);
+  tft.print(name);
+
+  // 2. SubTitle/Role (Medium, Primary Text)
+  if (subTitle.length() > 0) {
+      tft.setTextColor(COLOR_TEXT_PRIMARY);
+      tft.setTextSize(2);
+      tft.getTextBounds(subTitle, 0, 0, &x1, &y1, &w, &h);
+      tft.setCursor(centerX - w / 2, cardY + 70);
+      tft.print(subTitle);
+  }
+
+  // Divider Line
+  tft.drawFastHLine(cardX + 40, cardY + 100, cardW - 80, COLOR_TEXT_SECONDARY);
+
+  // 3. Comment (Small/Italic feel, Secondary Text)
+  tft.setTextColor(COLOR_TEXT_SECONDARY);
+  tft.setTextSize(1);
+  // Simple word wrap or just centering (assuming short quotes)
+  tft.getTextBounds(comment, 0, 0, &x1, &y1, &w, &h);
+  if (w > cardW - 20) {
+     // Very simple wrap logic if needed, but for now assuming it fits or simple split
+     tft.setCursor(cardX + 10, cardY + 120);
+     tft.print(comment);
+  } else {
+     tft.setCursor(centerX - w / 2, cardY + 120);
+     tft.print(comment);
+  }
+}
+
+void displayCreditMember1Static() {
+  drawProfileCard(
+    "MEMBER 1", 
+    COLOR_ORANGE, 
+    "PARK RAEWON", 
+    "(Leader)", 
+    "\"Couldnt be better.\""
+  );
 }
 
 void displayCreditMember2Static() {
-  tft.setCursor(65, 10);
-  tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.setTextSize(2);
-  tft.println("MEMBER 2");
-  drawBackButton();
-  
-  // [Mod] Updated Text for Member 2
-  tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.setCursor(60, 90); tft.print("PARK YESEONG");
-  tft.setCursor(60, 115); tft.print("Extraordinary claims require extraordinary evidence.");
+  drawProfileCard(
+    "MEMBER 2", 
+    COLOR_BLUE, 
+    "PARK YESEONG", 
+    "", 
+    "\"Extraordinary claims require \next raordinary evidence.\""
+  );
 }
 
 void displayCreditMember3Static() {
-  tft.setCursor(65, 10);
-  tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.setTextSize(2);
-  tft.println("MEMBER 3");
-  drawBackButton();
-  
-  // [Mod] Updated Text for Member 3
-  tft.setTextColor(COLOR_TEXT_PRIMARY);
-  tft.setCursor(60, 90); tft.print("JOO HWIJAE");
-  tft.setCursor(60, 115); tft.print("Butterflysoup.");
+  drawProfileCard(
+    "MEMBER 3", 
+    COLOR_GREEN, 
+    "JOO HWIJAE", 
+    "", 
+    "\"Butterflysoup.\""
+  );
 }
 
 void displaySettingsNetworkStatic() {
