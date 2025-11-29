@@ -8,7 +8,7 @@
  * - [Mod] Continuous(연속 인식) 적용: Timer/Calib/Protect 화면의 (+, -) 버튼
  * - [Fix] Waveform Trigger Mode 버튼은 연속 입력 가능하도록 예외 처리
  * - [Legacy] CALIB_AUTO 등은 기존 로직 유지
- * - [New] Timer Start/Stop 버튼 5초 이상 누름 시 설정값(0) 초기화 기능 추가
+ * - [Mod] Timer 5초 이상 누름 리셋 기능 제거
  * - [Fix] Timer 설정 값 변경 시 전체 화면 갱신(screenNeedsRedraw) 제거 -> 부분 갱신 유도
  * - [Mod] BASE 교정 값 수신 로직 제거 (하드코딩으로 변경됨)
  * ==============================================================================
@@ -518,14 +518,6 @@ void checkTouchInput() {
         // screenNeedsRedraw = true; // [Fix] Partial Update only
         delay(TOUCH_REPEAT_DELAY);
       } 
-      // [Mod] Start/Stop Button Long Press Check (5 sec -> Reset to 0)
-      else if (p.x >= 225 && p.x <= 315 && p.y >= 135 && p.y <= 185) {
-         if (touchDownTime != 0 && (millis() - touchDownTime > 5000)) {
-             temp_timer_setting_seconds = 0;
-             // screenNeedsRedraw = true; // [Fix] Partial Update only
-             touchDownTime = 0; // Reset to avoid multiple triggers
-         }
-      }
       break;
 
     case SCREEN_SETTINGS_CALIB_MANUAL:
