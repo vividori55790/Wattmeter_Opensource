@@ -241,7 +241,7 @@ void displayMainScreenValues() {
 
   tft.setTextSize(2);
   char buffer[20];
-  int col1_value_x = 60;
+  int col1_value_x = 35;
   int col2_value_x = 220; 
   // [Mod] 텍스트 겹침 방지를 위해 지움 영역 너비를 충분히 확보
   const int CLEAR_WIDTH = 110;

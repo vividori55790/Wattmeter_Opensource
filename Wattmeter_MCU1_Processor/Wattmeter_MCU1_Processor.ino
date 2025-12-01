@@ -28,7 +28,7 @@ const float I_ADC_MIDPOINT = 8192.0;
 #define SAMPLING_FREQ_HZ 3840.0f 
 #define SAMPLING_PERIOD_US (1000000.0f / SAMPLING_FREQ_HZ)
 #define FUNDALMENTAL_BIN 4 
-#define MAX_HARMONIC 15 
+#define MAX_HARMONIC 31 
 #define NUM_HARMONICS_TO_SEND 15 
 
 const float FREQUENCY = 60.0;
@@ -479,12 +479,23 @@ void perform_unified_analysis() {
 
   if (S_Physic > 0.1) {
       double angle_rad = PHASE_CAL_DEG * PI / 180.0;
+      // [Mod] P_real calculation maintained as requested
       P_real = P_measured * cos(angle_rad) + Q_measured * sin(angle_rad);
-      Q_reactive = -P_measured * sin(angle_rad) + Q_measured * cos(angle_rad);
       
-      // [수정] 무효전력 부호 제거 (절대값 처리)
-      if (Q_reactive < 0) Q_reactive = -Q_reactive;
-      S_apparent = hypot(P_real, Q_reactive);
+      // [Mod] Q_reactive Recalculation (Pythagorean Method: Q = sqrt(S^2 - P^2))
+      // Old: Q_reactive = -P_measured * sin(angle_rad) + Q_measured * cos(angle_rad);
+      
+      // [Mod] Update S_apparent to use accurate S_Physic
+      S_apparent = S_Physic;
+
+      // [Mod] Calculate Magnitude of Q
+      double q_sq = (double)S_apparent * S_apparent - (double)P_real * P_real;
+      if (q_sq < 0) q_sq = 0.0;
+      Q_reactive = sqrt(q_sq); // Magnitude (Sign will be applied after Phase detection)
+      
+      // [Mod] Old S_apparent calculation removed (already set)
+      // S_apparent = hypot(P_real, Q_reactive);
+
       PF = P_real / S_apparent;
       
       if (PF > 1.0) PF = 1.0; 
@@ -505,7 +516,7 @@ void perform_unified_analysis() {
   double ang_v = atan2(vImag[FUNDALMENTAL_BIN], vReal[FUNDALMENTAL_BIN]);
 
   FFT_V.complexToMagnitude(); 
-  thd_v_value = calculateTHD_FFT(vReal, FUNDALMENTAL_BIN) * 0.50; 
+  thd_v_value = calculateTHD_FFT(vReal, FUNDALMENTAL_BIN); 
 
   if (I_rms > CURRENT_CUTOFF_THRES) {
       FFT_I.windowing(FFTWindow::Hamming, FFTDirection::Forward);
@@ -529,9 +540,16 @@ void perform_unified_analysis() {
       else if (phase_main_deg > 0.5) lead_lag_status = "Lead";
       else lead_lag_status = "---";
       
+      // [Mod] Apply Sign to Q_reactive based on Lead/Lag Status
+      if (lead_lag_status == "Lead") {
+         Q_reactive = -abs(Q_reactive);
+      } else {
+         Q_reactive = abs(Q_reactive);
+      }
+
       // Main Current THD 계산
       FFT_I.complexToMagnitude(); // iReal이 Magnitude로 덮어써짐
-      thd_i_value = calculateTHD_FFT(iReal, FUNDALMENTAL_BIN) * 1.13; 
+      thd_i_value = calculateTHD_FFT(iReal, FUNDALMENTAL_BIN); 
   } else {
       thd_i_value = 0.0;
       phase_main_deg = 0.0;

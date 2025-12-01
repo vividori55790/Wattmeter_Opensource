@@ -129,7 +129,7 @@ void displayMainScreenStatic() {
   drawBackButton(); 
   tft.setTextSize(2);
   
-  int col1_label_x = 0;
+  int col1_label_x = 10;
   int col2_label_x = 170;
   
   tft.setCursor(col1_label_x, 40); tft.setTextColor(COLOR_BLUE); tft.println("V:");
