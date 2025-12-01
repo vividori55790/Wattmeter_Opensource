@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v219 (Fix Graph Scale Mismatch)
+ * 버전: v220 (Harmonics Update Logic Fix)
  * 설명: 
  * - [Fix] 릴레이 상태 표시: 변수 상태를 그대로 반영하도록 로직 단순화
  * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
@@ -11,6 +11,7 @@
  * - [Fix] Auto Calibration 재진입 시 값 갱신 안 되는 오류 수정 (resetViewStates 초기화 추가)
  * - [Fix] P/Q Waveform Stability (Continuous Mode) - 전역 버퍼 사용 및 초기화 로직
  * - [Fix] Waveform Screen Entry Scale Mismatch: Auto-ranging indices globalized & reset on entry
+ * - [Fix] 고조파 텍스트 모드 갱신 기준 변경 (% -> 실제값 Absolute Value)
  * ==============================================================================
  */
 
@@ -46,6 +47,9 @@ float prev_disp_I_rms_load2 = -1.0;
 float prev_disp_S_apparent = -1.0;
 float prev_disp_thd_v_main = -1.0;
 float prev_disp_thd_i_main = -1.0;
+
+// [Fix] 네트워크 설정 화면 상태 변수 전역 이동 (화면 재진입 시 즉시 갱신 위함)
+static WifiState prev_wifiState = (WifiState)-1;
 
 // 타이머 화면
 uint32_t prev_timer_display_time = 0xFFFFFFFF;
@@ -177,6 +181,9 @@ void resetViewStates() {
     prev_r1_state = !relay1_state; // 강제 불일치 유도
     prev_r2_state = !relay2_state;
 
+    // [Fix] 네트워크 설정 화면 상태 초기화 (재진입 시 즉시 갱신)
+    prev_wifiState = (WifiState)-1;
+
     // [Fix] Waveform Scale Reset (Start at Max Range to match Labels)
     range_idx_v = NUM_V_RANGES - 1;
     range_idx_i = NUM_I_RANGES - 1;
@@ -190,7 +197,7 @@ void runSettingsNetwork() {
     tft.drawRoundRect(60, 50, 200, 50, 10, COLOR_BUTTON_OUTLINE);
   }
 
-  static WifiState prev_wifiState = (WifiState)-1;
+  // [Mod] static 변수 제거하고 전역 변수(prev_wifiState) 사용
   static unsigned long lastBlinkTime = 0;
   static bool blinkState = true;
   
@@ -852,12 +859,14 @@ void displayHarmonicsScreenValues() {
      int start_y = 85; int line_h = 25;
      
      for (int i = 1; i <= 8; i++) {
-         if (abs(dataPtr[i] - prev_text_vals[i]) > 0.05 || screenNeedsRedraw) {
+         // [Mod] 절대값 계산을 비교 전에 수행하여, 실제 값 변화 감지
+         float val_abs = (dataPtr[i] / 100.0) * fundamental_rms;
+
+         // [Mod] % 변화가 아닌 실제 값(V/A) 변화가 0.01 이상일 때 갱신
+         if (abs(val_abs - prev_text_vals[i]) > 0.01 || screenNeedsRedraw) {
              int col_x = (i <= 4) ? col1_x : col2_x;
              int row_idx = (i <= 4) ? (i - 1) : (i - 5);
              int y = start_y + (row_idx * line_h);
-             
-             float val_abs = (dataPtr[i] / 100.0) * fundamental_rms;
              
              char buff_pct[8]; 
              if (dataPtr[i] >= 100.0) dtostrf(dataPtr[i], 3, 0, buff_pct); 
@@ -882,7 +891,9 @@ void displayHarmonicsScreenValues() {
              tft.print("("); tft.print(buff_pct); tft.print("%)");
              
              tft.setTextSize(2); tft.setTextColor(COLOR_TEXT_PRIMARY);
-             prev_text_vals[i] = dataPtr[i];
+             
+             // [Mod] 비율(%) 대신 실제 값(absolute value) 저장
+             prev_text_vals[i] = val_abs;
          }
      }
   }
