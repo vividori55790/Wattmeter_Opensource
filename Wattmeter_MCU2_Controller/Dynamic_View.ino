@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v220 (Harmonics Update Logic Fix)
+ * 버전: v221 (Main Screen Update Logic Fix)
  * 설명: 
  * - [Fix] 릴레이 상태 표시: 변수 상태를 그대로 반영하도록 로직 단순화
  * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
@@ -12,6 +12,7 @@
  * - [Fix] P/Q Waveform Stability (Continuous Mode) - 전역 버퍼 사용 및 초기화 로직
  * - [Fix] Waveform Screen Entry Scale Mismatch: Auto-ranging indices globalized & reset on entry
  * - [Fix] 고조파 텍스트 모드 갱신 기준 변경 (% -> 실제값 Absolute Value)
+ * - [Fix] 메인 화면 값 갱신 로직 개선 (문자열 비교 방식 적용)
  * ==============================================================================
  */
 
@@ -247,94 +248,149 @@ void displayMainScreenValues() {
   if (isMainPowerFrozen) return; 
 
   tft.setTextSize(2);
-  char buffer[20];
+  char buffer[32]; // [Mod] Increased buffer size
   int col1_value_x = 35;
   int col2_value_x = 220; 
   // [Mod] 텍스트 겹침 방지를 위해 지움 영역 너비를 충분히 확보
   const int CLEAR_WIDTH = 110;
-  int col_w_half = 90; 
-  int col_w_half_wide = 100;
+  // int col_w_half = 90; // Unused
+  // int col_w_half_wide = 100; // Unused
   
   // [Mod] static 제거 후 전역 변수 사용
 
+  // V_rms (Keep existing printTFTValue logic)
   printTFTValue(col1_value_x, 40, V_rms, prev_disp_V_rms, 1, COLOR_BLUE, " V");
   prev_disp_V_rms = V_rms;
   
-  if (abs(I_rms - prev_disp_I_rms) > 0.001 || screenNeedsRedraw) {
-      tft.fillRect(col1_value_x, 65, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half -> CLEAR_WIDTH
+  // ----------------------------------------------------------------
+  // Helper Lambdas for String Formatting
+  // ----------------------------------------------------------------
+  
+  // Current Formatting (mA / A)
+  auto formatCurrent = [](float val, char* buf) {
+      if (val < 1.0) {
+          dtostrf(val * 1000.0, 4, 0, buf);
+          return String(buf) + " mA";
+      } else {
+          dtostrf(val, 4, 2, buf);
+          return String(buf) + " A";
+      }
+  };
+
+  // Power (P) Formatting (kW / W)
+  auto formatPowerP = [](float val, char* buf) {
+      if (val >= 1000.0) {
+         dtostrf(val / 1000.0, 4, 2, buf);
+         return String(buf) + " kW";
+      } else {
+         dtostrf(val, 4, 1, buf);
+         return String(buf) + " W";
+      }
+  };
+
+  // Power (Q) Formatting (kVAR / VAR)
+  auto formatPowerQ = [](float val, char* buf) {
+      if (val >= 1000.0) {
+         dtostrf(val / 1000.0, 4, 2, buf);
+         return String(buf) + " kVAR";
+      } else {
+         dtostrf(val, 4, 1, buf);
+         return String(buf) + " VAR";
+      }
+  };
+
+  // Power (S) Formatting (kVA / VA)
+  auto formatPowerS = [](float val, char* buf) {
+      if (val >= 1000.0) {
+         dtostrf(val / 1000.0, 4, 2, buf);
+         return String(buf) + " kVA";
+      } else {
+         dtostrf(val, 4, 1, buf);
+         return String(buf) + " VA";
+      }
+  };
+
+  // ----------------------------------------------------------------
+  // Update Logic using String Comparison
+  // ----------------------------------------------------------------
+
+  // 1. I_rms (Main Current)
+  String curr_i_str = formatCurrent(I_rms, buffer);
+  String prev_i_str = (prev_disp_I_rms == -1.0) ? "" : formatCurrent(prev_disp_I_rms, buffer);
+  
+  if (!curr_i_str.equals(prev_i_str) || screenNeedsRedraw) {
+      tft.fillRect(col1_value_x, 65, CLEAR_WIDTH, 20, COLOR_BACKGROUND); 
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 65);
-      if (I_rms < 1.0) { 
-        dtostrf(I_rms * 1000.0, 4, 0, buffer); tft.print(buffer); tft.print(" mA");
-      } else { 
-        dtostrf(I_rms, 4, 2, buffer); tft.print(buffer); tft.print(" A");
-      }
+      tft.print(curr_i_str);
       prev_disp_I_rms = I_rms;
   }
   
-  if (abs(P_real - prev_disp_P_real) > 0.1 || screenNeedsRedraw) {
-      tft.fillRect(col1_value_x, 90, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half -> CLEAR_WIDTH
+  // 2. P_real (Real Power)
+  String curr_p_str = formatPowerP(P_real, buffer);
+  String prev_p_str = (prev_disp_P_real == -1.0) ? "" : formatPowerP(prev_disp_P_real, buffer);
+
+  if (!curr_p_str.equals(prev_p_str) || screenNeedsRedraw) {
+      tft.fillRect(col1_value_x, 90, CLEAR_WIDTH, 20, COLOR_BACKGROUND);
       tft.setTextColor(COLOR_DARKGREEN);
       tft.setCursor(col1_value_x, 90);
-      if (P_real >= 1000.0) { 
-        dtostrf(P_real / 1000.0, 4, 2, buffer); tft.print(buffer); tft.print(" kW");
-      } else { 
-        dtostrf(P_real, 4, 1, buffer); tft.print(buffer); tft.print(" W");
-      }
+      tft.print(curr_p_str);
       prev_disp_P_real = P_real;
   }
 
+  // 3. PF (Power Factor) - Keep existing
   printTFTValue(col2_value_x, 115, PF, prev_disp_PF, 2, COLOR_MAGENTA, "");
   prev_disp_PF = PF;
   
-  if (abs(Q_reactive - prev_disp_Q_reactive) > 0.1 || screenNeedsRedraw) {
-      tft.fillRect(col1_value_x, 115, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half -> CLEAR_WIDTH
+  // 4. Q_reactive (Reactive Power)
+  String curr_q_str = formatPowerQ(Q_reactive, buffer);
+  String prev_q_str = (prev_disp_Q_reactive == -1.0) ? "" : formatPowerQ(prev_disp_Q_reactive, buffer);
+
+  if (!curr_q_str.equals(prev_q_str) || screenNeedsRedraw) {
+      tft.fillRect(col1_value_x, 115, CLEAR_WIDTH, 20, COLOR_BACKGROUND);
       tft.setTextColor(COLOR_ORANGE);
       tft.setCursor(col1_value_x, 115);
-      if (Q_reactive >= 1000.0) { 
-        dtostrf(Q_reactive / 1000.0, 4, 2, buffer); tft.print(buffer); tft.print(" kVAR");
-      } else { 
-        dtostrf(Q_reactive, 4, 1, buffer); tft.print(buffer); tft.print(" VAR");
-      }
+      tft.print(curr_q_str);
       prev_disp_Q_reactive = Q_reactive;
   }
 
-  if (abs(I_rms_load1 - prev_disp_I_rms_load1) > 0.001 || screenNeedsRedraw) {
-      tft.fillRect(col2_value_x, 40, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half_wide -> CLEAR_WIDTH
+  // 5. I_rms_load1
+  String curr_i1_str = formatCurrent(I_rms_load1, buffer);
+  String prev_i1_str = (prev_disp_I_rms_load1 == -1.0) ? "" : formatCurrent(prev_disp_I_rms_load1, buffer);
+  
+  if (!curr_i1_str.equals(prev_i1_str) || screenNeedsRedraw) {
+      tft.fillRect(col2_value_x, 40, CLEAR_WIDTH, 20, COLOR_BACKGROUND);
       tft.setTextColor(COLOR_RED);
       tft.setCursor(col2_value_x, 40); 
-      if (I_rms_load1 < 1.0) { 
-        dtostrf(I_rms_load1 * 1000.0, 4, 0, buffer); tft.print(buffer); tft.print(" mA");
-      } else { 
-        dtostrf(I_rms_load1, 4, 2, buffer); tft.print(buffer); tft.print(" A");
-      }
+      tft.print(curr_i1_str);
       prev_disp_I_rms_load1 = I_rms_load1;
   }
 
-  if (abs(I_rms_load2 - prev_disp_I_rms_load2) > 0.001 || screenNeedsRedraw) {
-      tft.fillRect(col2_value_x, 65, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half_wide -> CLEAR_WIDTH
+  // 6. I_rms_load2
+  String curr_i2_str = formatCurrent(I_rms_load2, buffer);
+  String prev_i2_str = (prev_disp_I_rms_load2 == -1.0) ? "" : formatCurrent(prev_disp_I_rms_load2, buffer);
+
+  if (!curr_i2_str.equals(prev_i2_str) || screenNeedsRedraw) {
+      tft.fillRect(col2_value_x, 65, CLEAR_WIDTH, 20, COLOR_BACKGROUND);
       tft.setTextColor(COLOR_GREEN);
       tft.setCursor(col2_value_x, 65); 
-      if (I_rms_load2 < 1.0) { 
-        dtostrf(I_rms_load2 * 1000.0, 4, 0, buffer); tft.print(buffer); tft.print(" mA");
-      } else { 
-        dtostrf(I_rms_load2, 4, 2, buffer); tft.print(buffer); tft.print(" A");
-      }
+      tft.print(curr_i2_str);
       prev_disp_I_rms_load2 = I_rms_load2;
   }
 
-  if (abs(S_apparent - prev_disp_S_apparent) > 0.1 || screenNeedsRedraw) {
-      tft.fillRect(col2_value_x, 90, CLEAR_WIDTH, 20, COLOR_BACKGROUND); // col_w_half_wide -> CLEAR_WIDTH
+  // 7. S_apparent (Apparent Power)
+  String curr_s_str = formatPowerS(S_apparent, buffer);
+  String prev_s_str = (prev_disp_S_apparent == -1.0) ? "" : formatPowerS(prev_disp_S_apparent, buffer);
+
+  if (!curr_s_str.equals(prev_s_str) || screenNeedsRedraw) {
+      tft.fillRect(col2_value_x, 90, CLEAR_WIDTH, 20, COLOR_BACKGROUND);
       tft.setTextColor(COLOR_TEXT_PRIMARY);
       tft.setCursor(col2_value_x, 90); 
-      if (S_apparent >= 1000.0) { 
-        dtostrf(S_apparent / 1000.0, 4, 2, buffer); tft.print(buffer); tft.print(" kVA");
-      } else { 
-        dtostrf(S_apparent, 4, 1, buffer); tft.print(buffer); tft.print(" VA");
-      }
+      tft.print(curr_s_str);
       prev_disp_S_apparent = S_apparent;
   }
 
+  // 8. THD - Keep existing
   printTFTValue(col2_value_x, 140, thd_v_value, prev_disp_thd_v_main, 1, COLOR_BLUE, " %");
   prev_disp_thd_v_main = thd_v_value;
   printTFTValue(col2_value_x, 165, thd_i_value, prev_disp_thd_i_main, 1, COLOR_ORANGE, " %");
@@ -830,7 +886,7 @@ void displayHarmonicsScreenValues() {
                 tft.fillRect(x_pos, prev_y, bar_w - 4, prev_h - curr_h, COLOR_BACKGROUND);
                 
                 // 해당 영역에 그리드 선이 있으면 다시 그리기
-                for (int j = 0; j <= 3; j++) {
+                for (int j = 3; j >= 0; j--) {
                     int line_y = graph_y + (j * (graph_h / 3));
                     if (j == 3) line_y = graph_y + graph_h;
                     
@@ -840,8 +896,6 @@ void displayHarmonicsScreenValues() {
                         tft.drawFastHLine(x_pos, line_y, bar_w - 4, COLOR_GRID);
                     }
                 }
-                // 새 막대 상단 보정 (혹시 모를 픽셀 오차 방지용, 필요한 경우)
-                // tft.fillRect(x_pos, curr_y, bar_w - 4, 1, color); 
             }
             prev_bar_heights[i] = curr_h;
         }
