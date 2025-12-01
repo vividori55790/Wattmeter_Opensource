@@ -611,7 +611,12 @@ void loop() {
           break;
         case SCREEN_CONFIRM_SAVE: displayConfirmSaveStatic(); break;
         case SCREEN_WARNING: break;
-        case SCREEN_CREDIT_SPLASH: displayCreditSplashStatic(); break; // [New] 스플래시 화면 호출 추가
+        case SCREEN_CREDIT_SPLASH: 
+          displayCreditSplashStatic(); 
+          delay(2000); 
+          currentScreen = SCREEN_SETTINGS_CREDIT; 
+          screenNeedsRedraw = true; 
+          return; // 중요: 즉시 루프 재시작하여 다음 화면 그리기
         case SCREEN_SETTINGS_CREDIT: displaySettingsCreditStatic(); break;
         case SCREEN_CREDIT_MEMBER_1: displayCreditMember1Static(); break;
         case SCREEN_CREDIT_MEMBER_2: displayCreditMember2Static(); break;

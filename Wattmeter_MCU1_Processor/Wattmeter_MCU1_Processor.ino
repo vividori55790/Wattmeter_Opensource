@@ -394,7 +394,7 @@ void perform_unified_analysis() {
   // +20도를 더해야 0도가 됨. (Offset correction)
   const float PHASE_CAL_DEG = -20.0;
   const float PHASE_CAL_LOAD1 = -23.0;
-  const float PHASE_CAL_LOAD2 = -23.0;w
+  const float PHASE_CAL_LOAD2 = -23.0;
 
   waitForVoltageZeroCross();
 

@@ -564,7 +564,35 @@ void checkTouchInput() {
       } else if (auto_calib_step == 4) {
          if (p.x >= 75 && p.x <= 245 && p.y >= 125 && p.y <= 175) { auto_calib_step = 5; screenNeedsRedraw = true; }
       } else if (auto_calib_step == 5) {
-         if (p.x >= 15 && p.x <= 205 && p.y >= 175 && p.y <= 225) { previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE; } 
+         if (p.x >= 15 && p.x <= 205 && p.y >= 175 && p.y <= 225) { 
+           // [Mod] APPLY & SAVE: 즉시 저장 및 화면 이동 (CONFIRM 화면 생략)
+           V_MULTIPLIER = temp_V_MULTIPLIER; 
+           I_MULTIPLIER = temp_I_MULTIPLIER;
+           setting_step_index = temp_setting_step_index;
+           
+           txJsonDoc.clear(); 
+           txJsonDoc["CMD"] = "SET_CALIB"; 
+           txJsonDoc["V_MULT"] = V_MULTIPLIER; 
+           txJsonDoc["I_MULT"] = I_MULTIPLIER; 
+           serializeJson(txJsonDoc, Serial1); 
+           Serial1.println();
+           
+           txJsonDoc.clear(); 
+           txJsonDoc["CMD"] = "SET_PROTECT"; 
+           txJsonDoc["V_THR"] = VOLTAGE_THRESHOLD; 
+           serializeJson(txJsonDoc, Serial1); 
+           Serial1.println();
+           
+           txJsonDoc.clear(); 
+           txJsonDoc["CMD"] = "SET_STEP"; 
+           txJsonDoc["IDX"] = setting_step_index; 
+           serializeJson(txJsonDoc, Serial1); 
+           Serial1.println();
+           
+           settingsChanged = false; 
+           currentScreen = SCREEN_SETTINGS; 
+           screenNeedsRedraw = true;
+         } 
          else if (p.x >= 205 && p.x <= 315 && p.y >= 175 && p.y <= 225) { auto_calib_step = 0; screenNeedsRedraw = true; }
       }
       break;

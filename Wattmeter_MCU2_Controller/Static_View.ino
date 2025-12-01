@@ -13,7 +13,7 @@
  */
 
 // 광운대학교 상징색 (Deep Red/Burgundy) 정의
-#define COLOR_KW_BURGUNDY 0x7106 
+#define COLOR_KW_BURGUNDY 0x7ED9 
 
 void setTheme() {
   if (isDarkMode) {
@@ -278,28 +278,53 @@ void displaySettingsScreenStatic() {
   drawButton(170, 170, 130, 40, "ADVANCED");
 }
 
-// --- [New] Credit Splash Screen ---
+// --- [Modified] Credit Splash Screen ---
 void displayCreditSplashStatic() {
-  // 1. Background Fill with KW Burgundy
+  // 1. 배경색: KW Burgundy 사용
   tft.fillScreen(COLOR_KW_BURGUNDY);
   
-  // 2. Draw University Name
+  // 2. 테두리: 흰색 직사각형, 두께감 있게 (3픽셀 두께)
+  // 가장자리에서 12픽셀 안쪽
+  int borderPadding = 12;
+  int borderThick = 3;
   tft.setTextColor(ILI9341_WHITE);
-  tft.setTextSize(3);
   
-  String title = "KWANGWOON UNIV.";
+  for (int i = 0; i < borderThick; i++) {
+    tft.drawRect(
+      borderPadding + i, 
+      borderPadding + i, 
+      SCREEN_WIDTH - 2 * (borderPadding + i), 
+      SCREEN_HEIGHT - 2 * (borderPadding + i), 
+      ILI9341_WHITE
+    );
+  }
+  
+  // 3. 텍스트 1: KWANGWOON (상단, 큼직하게)
+  tft.setTextSize(3);
+  String textMain = "KWANGWOON";
   int16_t x1, y1;
   uint16_t w, h;
-  tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  tft.getTextBounds(textMain, 0, 0, &x1, &y1, &w, &h);
   
-  // Center alignment
-  tft.setCursor((SCREEN_WIDTH - w) / 2, (SCREEN_HEIGHT - h) / 2);
-  tft.print(title);
+  int cx = SCREEN_WIDTH / 2;
+  int cy = SCREEN_HEIGHT / 2;
   
-  // 3. Auto-transition logic
-  delay(2000); // 2 seconds delay
-  currentScreen = SCREEN_SETTINGS_CREDIT;
-  screenNeedsRedraw = true;
+  // 중앙보다 약간 위쪽 (40픽셀 위)
+  int textMainY = cy - 40; 
+  tft.setCursor(cx - w / 2, textMainY);
+  tft.print(textMain);
+  
+  // 4. 텍스트 2: UNIVERSITY (하단, 작게, 자간 넓게)
+  tft.setTextSize(2);
+  // 스페이스를 넣어 Kerning 효과 구현
+  String textSub = "U N I V E R S I T Y";
+  tft.getTextBounds(textSub, 0, 0, &x1, &y1, &w, &h);
+  
+  // 위 텍스트 아래 20픽셀 간격
+  tft.setCursor(cx - w / 2, textMainY + 40 + 20); 
+  tft.print(textSub);
+  
+  // 5. 화면 갱신 및 전환 로직은 Controller(Loop)로 이동을 위해 삭제됨.
 }
 
 // --- [New] Credit Screen & Sub Screens ---
