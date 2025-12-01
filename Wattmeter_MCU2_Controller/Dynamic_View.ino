@@ -506,7 +506,7 @@ void updateYAxisLabels() {
 
   // Type 2 (I/I1/I2): 단일 통합 라벨, 검정색
   if (waveformPlotType == 2) {
-    tft.setTextColor(ILI9341_BLACK); // Inst 4: Black Color
+    tft.setTextColor(ILI9341_ORANGE); // Inst 4: Black Color
     dtostrf(plot1_axis_max, 3, 0, buffer); 
     tft.setCursor(x_pos, y_pos);
     tft.print("+"); tft.print(buffer); tft.print("A");
