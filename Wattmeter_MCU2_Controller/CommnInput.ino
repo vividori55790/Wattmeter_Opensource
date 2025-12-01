@@ -11,6 +11,8 @@
  * - [Mod] Timer 5초 이상 누름 리셋 기능 제거
  * - [Fix] Timer 설정 값 변경 시 전체 화면 갱신(screenNeedsRedraw) 제거 -> 부분 갱신 유도
  * - [Mod] BASE 교정 값 수신 로직 제거 (하드코딩으로 변경됨)
+ * - [Update] EEPROM Preset Save/Load includes ADC Midpoints (Offsets)
+ * - [Update] Reset Settings includes ADC Midpoints (8192.0)
  * ==============================================================================
  */
 
@@ -130,10 +132,13 @@ void checkSerialInput() {
 
         warningActive = true;
 
+        // [Mod] Reset All Settings except Offsets on Warning
         V_MULTIPLIER = DEFAULT_V_MULTIPLIER;
         I_MULTIPLIER = DEFAULT_I_MULTIPLIER;
         VOLTAGE_THRESHOLD = DEFAULT_VOLTAGE_THRESHOLD;
         setting_step_index = DEFAULT_SETTING_STEP_INDEX;
+        
+        // [User Request] ADC Midpoint Reset Code REMOVED Here
 
         txJsonDoc.clear();
         txJsonDoc["CMD"] = "RESET_SETTINGS";
@@ -233,7 +238,17 @@ void adjustProtectValue(bool increase) {
 // --- EEPROM 프리셋 저장/로드 ---
 void savePreset(int slot) {
   int addr = EEPROM_BASE_ADDR + (slot * PRESET_SIZE);
-  Preset p = {V_MULTIPLIER, I_MULTIPLIER, VOLTAGE_THRESHOLD, true};
+  // [Mod] Save Midpoint (Offset) values to Preset
+  // Note: 'Preset' struct in MCU2_Controller.ino must have fields: v_mid, i_mid, i1_mid, i2_mid
+  Preset p;
+  p.v_mult = V_MULTIPLIER;
+  p.i_mult = I_MULTIPLIER;
+  p.v_thresh = VOLTAGE_THRESHOLD;
+  p.v_mid = V_ADC_MIDPOINT_CALIB;
+  p.i_mid = I_ADC_MIDPOINT_CALIB;
+  p.i1_mid = I1_ADC_MIDPOINT_CALIB;
+  p.i2_mid = I2_ADC_MIDPOINT_CALIB;
+  p.valid = true;
   EEPROM.put(addr, p);
 }
 
@@ -245,6 +260,12 @@ void loadPreset(int slot) {
     V_MULTIPLIER = p.v_mult;
     I_MULTIPLIER = p.i_mult;
     VOLTAGE_THRESHOLD = p.v_thresh;
+    
+    // [Mod] Load Midpoint (Offset) values to Global Variables
+    V_ADC_MIDPOINT_CALIB = p.v_mid;
+    I_ADC_MIDPOINT_CALIB = p.i_mid;
+    I1_ADC_MIDPOINT_CALIB = p.i1_mid;
+    I2_ADC_MIDPOINT_CALIB = p.i2_mid;
     
     txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_CALIB"; txJsonDoc["V_MULT"] = V_MULTIPLIER; txJsonDoc["I_MULT"] = I_MULTIPLIER; serializeJson(txJsonDoc, Serial1); Serial1.println();
     txJsonDoc.clear(); txJsonDoc["CMD"] = "SET_PROTECT"; txJsonDoc["V_THR"] = VOLTAGE_THRESHOLD; serializeJson(txJsonDoc, Serial1); Serial1.println();
@@ -622,7 +643,13 @@ void checkTouchInput() {
       break;
 
     case SCREEN_SETTINGS_RESET:
-      if (p.x >= 15 && p.x <= 155 && p.y >= 95 && p.y <= 145) { sendJsonCommand("{\"CMD\":\"RESET_SETTINGS\"}"); currentScreen = SCREEN_SETTINGS_ADVANCED; screenNeedsRedraw = true; }
+      if (p.x >= 15 && p.x <= 155 && p.y >= 95 && p.y <= 145) { 
+        // [User Request] ADC Midpoint Reset Code REMOVED Here
+        
+        sendJsonCommand("{\"CMD\":\"RESET_SETTINGS\"}"); 
+        currentScreen = SCREEN_SETTINGS_ADVANCED; 
+        screenNeedsRedraw = true; 
+      }
       else if (p.x >= 165 && p.x <= 305 && p.y >= 95 && p.y <= 145) { currentScreen = SCREEN_SETTINGS_ADVANCED; screenNeedsRedraw = true; }
       break;
 

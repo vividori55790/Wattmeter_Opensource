@@ -160,6 +160,11 @@ struct Preset {
   float i_mult;
   float v_thresh;
   bool valid;
+  // [Mod] 오프셋 저장용 필드 추가 (Auto-Calibration 값 저장)
+  float v_mid;
+  float i_mid;
+  float i1_mid;
+  float i2_mid;
 };
 const int EEPROM_BASE_ADDR = 0;
 const int PRESET_SIZE = sizeof(Preset);

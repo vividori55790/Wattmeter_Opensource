@@ -129,7 +129,7 @@ void displayMainScreenStatic() {
   drawBackButton(); 
   tft.setTextSize(2);
   
-  int col1_label_x = 10;
+  int col1_label_x = 0;
   int col2_label_x = 170;
   
   tft.setCursor(col1_label_x, 40); tft.setTextColor(COLOR_BLUE); tft.println("V:");
@@ -287,7 +287,7 @@ void displayCreditSplashStatic() {
   // 가장자리에서 12픽셀 안쪽
   int borderPadding = 12;
   int borderThick = 3;
-  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextColor(ILI9341_BLACK);
   
   for (int i = 0; i < borderThick; i++) {
     tft.drawRect(
@@ -295,7 +295,7 @@ void displayCreditSplashStatic() {
       borderPadding + i, 
       SCREEN_WIDTH - 2 * (borderPadding + i), 
       SCREEN_HEIGHT - 2 * (borderPadding + i), 
-      ILI9341_WHITE
+      ILI9341_BLACK
     );
   }
   
