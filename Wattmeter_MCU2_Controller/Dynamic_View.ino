@@ -498,13 +498,15 @@ void displayPhaseScreenValues() {
 void updateYAxisLabels() {
   // 기존 라벨 영역 지우기
   // [Fix] 라벨 위치를 그래프 바깥쪽(위)으로 이동하여 파형 겹침 방지
-  tft.fillRect(PLOT_X_START, PLOT_Y_START - 20, 190, 20, COLOR_BACKGROUND);
+  // [Fix2] Back Button(y=5~35)과 Graph Start(y=50) 사이의 15px 여백 사용
+  // Back Button을 건드리지 않기 위해 y=36부터 y=49까지만 지움
+  tft.fillRect(PLOT_X_START, PLOT_Y_START - 14, 190, 13, COLOR_BACKGROUND); 
 
   tft.setTextSize(1);
   char buffer[10]; 
   int x_pos = PLOT_X_START + 5;
-  // [Fix] Y좌표를 그래프 시작선보다 위로 올림
-  int y_pos = PLOT_Y_START - 15;
+  // [Fix2] 텍스트를 여백 중앙(y=38 근처)에 배치
+  int y_pos = PLOT_Y_START - 12;
 
   // Type 2 (I/I1/I2): 단일 통합 라벨, 검정색
   if (waveformPlotType == 2) {
