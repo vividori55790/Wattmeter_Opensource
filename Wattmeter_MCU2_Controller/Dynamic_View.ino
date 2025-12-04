@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 3. Dynamic_View.ino
- * 버전: v221 (Main Screen Update Logic Fix)
+ * 버전: v222 (Auto-Ranging Speed Boost & Memory)
  * 설명: 
  * - [Fix] 릴레이 상태 표시: 변수 상태를 그대로 반영하도록 로직 단순화
  * - [Fix] 페이서 작도: 선 이동 시 지워지는 배경 그리드 복구 로직 추가
@@ -13,6 +13,8 @@
  * - [Fix] Waveform Screen Entry Scale Mismatch: Auto-ranging indices globalized & reset on entry
  * - [Fix] 고조파 텍스트 모드 갱신 기준 변경 (% -> 실제값 Absolute Value)
  * - [Fix] 메인 화면 값 갱신 로직 개선 (문자열 비교 방식 적용)
+ * - [Mod] Auto-Ranging: 반응 속도 개선 (Hysteresis 20->5, Threshold 0.6->0.75, Jump Logic)
+ * - [Mod] Auto-Ranging: 화면 전환 시 범위 초기화 방지 (Memory Feature)
  * ==============================================================================
  */
 
@@ -186,9 +188,10 @@ void resetViewStates() {
     prev_wifiState = (WifiState)-1;
 
     // [Fix] Waveform Scale Reset (Start at Max Range to match Labels)
-    range_idx_v = NUM_V_RANGES - 1;
-    range_idx_i = NUM_I_RANGES - 1;
-    range_idx_p = NUM_P_RANGES - 1;
+    // [Mod] 화면 전환 시 범위 기억을 위해 초기화 코드 주석 처리 (User Request)
+    // range_idx_v = NUM_V_RANGES - 1;
+    // range_idx_i = NUM_I_RANGES - 1;
+    // range_idx_p = NUM_P_RANGES - 1;
 }
 
 // --- [Mod] 네트워크 설정 화면 동적 갱신 ---
@@ -588,8 +591,8 @@ void runCombinedWaveformLoop() {
   if (waveformTriggerMode == 0) { // Cont. Mode
       // FIX: 지역 변수 선언 제거 (local_lag_buf, lag_head)
     
-      // [FIX] P/Q 모드이면서 버퍼가 초기화되지 않았을 경우에만 Pre-fill 실행
-      if (waveformPlotType == 1 && !IS_LAG_BUFFER_INIT) {
+      // [FIX] P/Q 모드일 경우 매번 버퍼를 Pre-fill 실행 (화면 갱신 딜레이 보정)
+      if (waveformPlotType == 1) {
           P_Q_LAG_HEAD = 0; // [FIX] Use Global Head and reset
           for(int k=0; k<lag_size; k++) {
               int r_v = analogRead(PIN_ADC_V);
@@ -598,7 +601,7 @@ void runCombinedWaveformLoop() {
               P_Q_LAG_HEAD = (P_Q_LAG_HEAD + 1) % lag_size; // [FIX] Use Global Head
               delayMicroseconds(delay_us);
           }
-          IS_LAG_BUFFER_INIT = true; // [FIX] Set init flag
+          IS_LAG_BUFFER_INIT = true; // [FIX] Set init flag (Keep flag logic for consistency)
       }
     
       // [New] P/Q 모드가 아닐 경우, 다음 진입을 위해 플래그 리셋
@@ -713,44 +716,79 @@ void runCombinedWaveformLoop() {
   }
   
   // ============================================================
-  // 2. 오토 레인징 (Auto-ranging)
+  // 2. 오토 레인징 (Auto-ranging) [Modified for Noise Filter & Hysteresis]
   // ============================================================
-  float max_val_p1 = 0.0, max_val_p2 = 0.0, max_val_p3 = 0.0;
-  for(int i=0; i<PLOT_WIDTH; i++) {
-     if (abs(v_buf[i]) > max_val_p1) max_val_p1 = abs(v_buf[i]);
-     if (abs(p2_buf[i]) > max_val_p2) max_val_p2 = abs(p2_buf[i]);
-     if (waveformPlotType == 2 && abs(p3_buf[i]) > max_val_p3) max_val_p3 = abs(p3_buf[i]);
-  }
+  
+  // [Robust Peak] Find 3rd largest absolute value to ignore spikes
+  auto getRobustPeak = [](float* data, int len) -> float {
+      float m1 = 0, m2 = 0, m3 = 0;
+      for(int i=0; i<len; i++) {
+          float v = abs(data[i]);
+          if (v > m1) { m3 = m2; m2 = m1; m1 = v; }
+          else if (v > m2) { m3 = m2; m2 = v; }
+          else if (v > m3) { m3 = v; }
+      }
+      return m3;
+  };
 
-  // [Fix] Removed static declaration, using global range indices
+  float robust_peak_p1 = getRobustPeak(v_buf, PLOT_WIDTH);
+  float robust_peak_p2 = getRobustPeak(p2_buf, PLOT_WIDTH);
+  float robust_peak_p3 = (waveformPlotType == 2) ? getRobustPeak(p3_buf, PLOT_WIDTH) : 0.0;
+
   bool rangeChanged = false;
+  
+  // [Hysteresis] Counters to delay range reduction
+  static int down_count_v = 0;
+  static int down_count_i = 0;
+  static int down_count_p = 0;
 
-  auto updateRange = [&](int &idx, float peak, const float* ranges, int count) {
+  // [Mod] updateRange Lambda Improvement: Faster Response (Threshold: 0.6 -> 0.75, Count: 20 -> 5, Jump Logic)
+  auto updateRange = [&](int &idx, float peak, const float* ranges, int count, int &down_cnt) {
       bool changed = false;
+      // 1. Range Increase: Immediate
       if (peak > ranges[idx]) {
           while (idx < count - 1 && peak > ranges[idx]) idx++;
+          down_cnt = 0; // Reset counter
           changed = true;
-      } else if (idx > 0) {
-          if (peak < (ranges[idx-1] * 0.6)) { idx--; changed = true; }
+      } 
+      // 2. Range Decrease: Faster Hysteresis (Threshold 0.75x, Count 5, Jump Logic)
+      else if (idx > 0) {
+          // [Mod] Threshold 0.6 -> 0.75 for faster reaction
+          if (peak < (ranges[idx-1] * 0.6)) { 
+             down_cnt++;
+             // [Mod] Count 20 -> 5 for faster reaction
+             if (down_cnt >= 5) { 
+                 // [Mod] Use while loop to jump down multiple steps if needed
+                 while (idx > 0 && peak < (ranges[idx-1] * 0.75)) {
+                     idx--;
+                 }
+                 down_cnt = 0; 
+                 changed = true; 
+             }
+          } else {
+             down_cnt = 0; // Reset if signal is steady within range
+          }
+      } else {
+         down_cnt = 0;
       }
       return changed;
   };
 
   if (waveformPlotType == 0) { // V/I
-     if (updateRange(range_idx_v, max_val_p1, V_RANGES, NUM_V_RANGES)) rangeChanged = true;
-     if (updateRange(range_idx_i, max_val_p2, I_RANGES, NUM_I_RANGES)) rangeChanged = true;
+     if (updateRange(range_idx_v, robust_peak_p1, V_RANGES, NUM_V_RANGES, down_count_v)) rangeChanged = true;
+     if (updateRange(range_idx_i, robust_peak_p2, I_RANGES, NUM_I_RANGES, down_count_i)) rangeChanged = true;
      plot1_axis_max = V_RANGES[range_idx_v]; 
      plot2_axis_max = I_RANGES[range_idx_i];
   } 
   else if (waveformPlotType == 1) { // P/Q
-     float max_pq = max(max_val_p1, max_val_p2);
-     if (updateRange(range_idx_p, max_pq, P_RANGES, NUM_P_RANGES)) rangeChanged = true;
+     float max_pq = max(robust_peak_p1, robust_peak_p2);
+     if (updateRange(range_idx_p, max_pq, P_RANGES, NUM_P_RANGES, down_count_p)) rangeChanged = true;
      plot1_axis_max = P_RANGES[range_idx_p]; 
      plot2_axis_max = P_RANGES[range_idx_p];
   } 
   else { // I/I1/I2
-     float global_max = max(max_val_p1, max(max_val_p2, max_val_p3));
-     if (updateRange(range_idx_i, global_max, I_RANGES, NUM_I_RANGES)) rangeChanged = true;
+     float global_max = max(robust_peak_p1, max(robust_peak_p2, robust_peak_p3));
+     if (updateRange(range_idx_i, global_max, I_RANGES, NUM_I_RANGES, down_count_i)) rangeChanged = true;
      plot1_axis_max = I_RANGES[range_idx_i]; 
      plot2_axis_max = I_RANGES[range_idx_i]; 
      plot3_axis_max = I_RANGES[range_idx_i];
@@ -1077,51 +1115,4 @@ void displaySettingsTimerValues() {
      
      prev_is_timer_active = is_timer_active;
   }
-}
-
-// [New] 오프닝 화면 그리기 함수 (로고 + 텍스트)
-void displayOpeningScreen() {
-  // 1. 전체 배경 흰색 초기화
-  tft.fillScreen(ILI9341_BLACK);
-
-  int cx = SCREEN_WIDTH / 2;
-  int cy = SCREEN_HEIGHT / 2 - 20; // 로고 중심 (하단 텍스트 공간 확보를 위해 약간 위로)
-
-  // 2. 파란색 두꺼운 원 그리기 (Blue Ring)
-  // 바깥 원(파랑) - 안쪽 원(흰색) = 링 효과
-  tft.fillCircle(cx, cy, 60, COLOR_ORANGE);
-  tft.fillCircle(cx, cy, 48, ILI9341_BLACK);
-
-  // 3. 번개 모양 그리기 (중앙, 파란색)
-  // 두 개의 삼각형을 이어 붙여 번개 모양(Z형태) 구현
-  // 좌표는 cx, cy 기준으로 미세 조정하여 역동적인 느낌 부여
-  // 상단 삼각형 (우상향에서 중앙으로)
-  tft.fillTriangle(cx + 10, cy - 40, cx - 15, cy + 5, cx + 5, cy + 5, COLOR_ORANGE);
-  // 하단 삼각형 (중앙에서 좌하향으로)
-  tft.fillTriangle(cx - 10, cy + 40, cx + 15, cy - 5, cx - 5, cy - 5, COLOR_ORANGE);
-
-  // 4. "K", "W" 텍스트 그리기 (원 내부 좌우 배치)
-  tft.setTextColor(COLOR_ORANGE);
-  tft.setTextSize(4); // 크고 굵게
-  
-  // "K" - 원의 왼쪽 부분
-  tft.setCursor(cx - 45, cy - 15);
-  tft.print("K");
-
-  // "W" - 원의 오른쪽 부분
-  tft.setCursor(cx + 25, cy - 15);
-  tft.print("W");
-
-  // 5. 하단 "WATTMETER" 텍스트
-  tft.setTextColor(ILI9341_WHITE);
-  tft.setTextSize(3); // 강조된 크기
-  
-  String title = "WATTMETER";
-  int16_t x1, y1;
-  uint16_t w, h;
-  // 텍스트 너비 계산하여 중앙 정렬
-  tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
-  
-  tft.setCursor((SCREEN_WIDTH - w) / 2, cy + 75);
-  tft.print(title);
 }

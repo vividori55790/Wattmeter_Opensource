@@ -245,6 +245,10 @@ float plot1_axis_max = V_RANGES[NUM_V_RANGES-1];
 float plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; 
 float plot3_axis_max = I_RANGES[NUM_I_RANGES-1]; 
 
+extern int range_idx_v;
+extern int range_idx_i;
+extern int range_idx_p;
+
 // [FIX] P/Q 파형 안정화를 위한 전역 정적 버퍼 추가
 #define MAX_LAG_SIZE 64 // lag_size의 최댓값(약 42)을 고려한 안전한 크기
 float P_Q_LAG_BUFFER[MAX_LAG_SIZE]; 
@@ -584,10 +588,20 @@ void loop() {
         case SCREEN_PHASE_DIFFERENCE: displayPhaseScreenStatic(); break;
         case SCREEN_COMBINED_WAVEFORM:
           isWaveformFrozen = false; waveformTriggerMode = 0; 
-          // 초기 범위 설정
-          if (waveformPlotType == 0) { plot1_axis_max = V_RANGES[NUM_V_RANGES-1]; plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; } 
-          else if (waveformPlotType == 1) { plot1_axis_max = P_RANGES[NUM_P_RANGES-1]; plot2_axis_max = P_RANGES[NUM_P_RANGES-1]; } 
-          else { plot1_axis_max = I_RANGES[NUM_I_RANGES-1]; plot2_axis_max = I_RANGES[NUM_I_RANGES-1]; plot3_axis_max = I_RANGES[NUM_I_RANGES-1]; }
+          // [Mod] 초기 범위 설정: 이전 인덱스(range_idx)를 사용하여 상태 기억
+          if (waveformPlotType == 0) { 
+              plot1_axis_max = V_RANGES[range_idx_v]; 
+              plot2_axis_max = I_RANGES[range_idx_i]; 
+          } 
+          else if (waveformPlotType == 1) { 
+              plot1_axis_max = P_RANGES[range_idx_p]; 
+              plot2_axis_max = P_RANGES[range_idx_p]; 
+          } 
+          else { 
+              plot1_axis_max = I_RANGES[range_idx_i]; 
+              plot2_axis_max = I_RANGES[range_idx_i]; 
+              plot3_axis_max = I_RANGES[range_idx_i]; 
+          }
           
           drawWaveformGridAndLabels(); updateYAxisLabels();      
           for(int i=0; i<PLOT_WIDTH; i++) { last_frame_y_plot1[i] = PLOT_Y_CENTER; last_frame_y_plot2[i] = PLOT_Y_CENTER; last_frame_y_plot3[i] = PLOT_Y_CENTER; }
