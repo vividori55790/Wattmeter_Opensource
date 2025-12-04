@@ -497,12 +497,14 @@ void displayPhaseScreenValues() {
 // --- [Mod] Y-Axis Label Update: Internal Top-Left & Color Matched ---
 void updateYAxisLabels() {
   // 기존 라벨 영역 지우기
-  tft.fillRect(PLOT_X_START + 1, PLOT_Y_START + 1, 200, 20, COLOR_BACKGROUND);
+  // [Fix] 라벨 위치를 그래프 바깥쪽(위)으로 이동하여 파형 겹침 방지
+  tft.fillRect(PLOT_X_START, PLOT_Y_START - 20, 190, 20, COLOR_BACKGROUND);
 
   tft.setTextSize(1);
   char buffer[10]; 
   int x_pos = PLOT_X_START + 5;
-  int y_pos = PLOT_Y_START + 5;
+  // [Fix] Y좌표를 그래프 시작선보다 위로 올림
+  int y_pos = PLOT_Y_START - 15;
 
   // Type 2 (I/I1/I2): 단일 통합 라벨, 검정색
   if (waveformPlotType == 2) {
@@ -585,8 +587,7 @@ void runCombinedWaveformLoop() {
       // FIX: 지역 변수 선언 제거 (local_lag_buf, lag_head)
     
       // [FIX] P/Q 모드이면서 버퍼가 초기화되지 않았을 경우에만 Pre-fill 실행
-      // [수정] P/Q 모드일 때 매 프레임마다 버퍼를 채우도록 조건 변경
-      if (waveformPlotType == 1) { 
+      if (waveformPlotType == 1 && !IS_LAG_BUFFER_INIT) {
           P_Q_LAG_HEAD = 0; // [FIX] Use Global Head and reset
           for(int k=0; k<lag_size; k++) {
               int r_v = analogRead(PIN_ADC_V);
