@@ -585,7 +585,8 @@ void runCombinedWaveformLoop() {
       // FIX: 지역 변수 선언 제거 (local_lag_buf, lag_head)
     
       // [FIX] P/Q 모드이면서 버퍼가 초기화되지 않았을 경우에만 Pre-fill 실행
-      if (waveformPlotType == 1 && !IS_LAG_BUFFER_INIT) {
+      // [수정] P/Q 모드일 때 매 프레임마다 버퍼를 채우도록 조건 변경
+      if (waveformPlotType == 1) { 
           P_Q_LAG_HEAD = 0; // [FIX] Use Global Head and reset
           for(int k=0; k<lag_size; k++) {
               int r_v = analogRead(PIN_ADC_V);
@@ -934,7 +935,7 @@ void displayHarmonicsScreenValues() {
              tft.fillRect(col_x, y, 140, line_h, COLOR_BACKGROUND);
              tft.setCursor(col_x, y);
              
-             // [Mod] Correct Labeling (1, 3, 5... 15)
+             // [Mod] Correct Labeling (1, 3, 5 ... 15)
              int harmonic_order = (i==1) ? 1 : (2*i - 1);
              tft.print(harmonic_order); tft.print(":");
              
@@ -1073,4 +1074,51 @@ void displaySettingsTimerValues() {
      
      prev_is_timer_active = is_timer_active;
   }
+}
+
+// [New] 오프닝 화면 그리기 함수 (로고 + 텍스트)
+void displayOpeningScreen() {
+  // 1. 전체 배경 흰색 초기화
+  tft.fillScreen(ILI9341_BLACK);
+
+  int cx = SCREEN_WIDTH / 2;
+  int cy = SCREEN_HEIGHT / 2 - 20; // 로고 중심 (하단 텍스트 공간 확보를 위해 약간 위로)
+
+  // 2. 파란색 두꺼운 원 그리기 (Blue Ring)
+  // 바깥 원(파랑) - 안쪽 원(흰색) = 링 효과
+  tft.fillCircle(cx, cy, 60, COLOR_ORANGE);
+  tft.fillCircle(cx, cy, 48, ILI9341_BLACK);
+
+  // 3. 번개 모양 그리기 (중앙, 파란색)
+  // 두 개의 삼각형을 이어 붙여 번개 모양(Z형태) 구현
+  // 좌표는 cx, cy 기준으로 미세 조정하여 역동적인 느낌 부여
+  // 상단 삼각형 (우상향에서 중앙으로)
+  tft.fillTriangle(cx + 10, cy - 40, cx - 15, cy + 5, cx + 5, cy + 5, COLOR_ORANGE);
+  // 하단 삼각형 (중앙에서 좌하향으로)
+  tft.fillTriangle(cx - 10, cy + 40, cx + 15, cy - 5, cx - 5, cy - 5, COLOR_ORANGE);
+
+  // 4. "K", "W" 텍스트 그리기 (원 내부 좌우 배치)
+  tft.setTextColor(COLOR_ORANGE);
+  tft.setTextSize(4); // 크고 굵게
+  
+  // "K" - 원의 왼쪽 부분
+  tft.setCursor(cx - 45, cy - 15);
+  tft.print("K");
+
+  // "W" - 원의 오른쪽 부분
+  tft.setCursor(cx + 25, cy - 15);
+  tft.print("W");
+
+  // 5. 하단 "WATTMETER" 텍스트
+  tft.setTextColor(ILI9341_WHITE);
+  tft.setTextSize(3); // 강조된 크기
+  
+  String title = "WATTMETER";
+  int16_t x1, y1;
+  uint16_t w, h;
+  // 텍스트 너비 계산하여 중앙 정렬
+  tft.getTextBounds(title, 0, 0, &x1, &y1, &w, &h);
+  
+  tft.setCursor((SCREEN_WIDTH - w) / 2, cy + 75);
+  tft.print(title);
 }
