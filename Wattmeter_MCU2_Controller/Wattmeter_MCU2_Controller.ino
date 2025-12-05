@@ -170,7 +170,9 @@ const int EEPROM_BASE_ADDR = 0;
 const int PRESET_SIZE = sizeof(Preset);
 bool isPresetSaveMode = false; 
 
-// --- 네트워크 및 ThingSpeak 변수 ---
+// ==========================================
+// [추가] 네트워크 및 ThingSpeak 변수/상수
+// ==========================================
 String wifiSSID = "Mathsaves"; 
 String wifiPASS = "19886382"; 
 String apiKey = "X50GVA1VU213PQ3Z"; 
@@ -178,13 +180,12 @@ String apiKey = "X50GVA1VU213PQ3Z";
 // [Mod] 네트워크 상태 관리 (OFF -> WAIT -> ON)
 enum WifiState { WIFI_OFF, WIFI_WAIT, WIFI_CONNECTED_STATE };
 WifiState wifiState = WIFI_OFF;
-unsigned long lastWifiRetryTime = 0;
-const unsigned long WIFI_RETRY_INTERVAL = 2000; // 재시도 간격 (blocking 완화용)
 
-// [Mod] 전송 플래그 변수 삭제됨 (send_V, send_I, send_P) - P값 고정 전송
+unsigned long lastWifiRetryTime = 0;
+const unsigned long WIFI_RETRY_INTERVAL = 2000; // 재시도 간격
 
 unsigned long lastSendTime = 0; 
-const unsigned long SEND_INTERVAL = 20000; 
+const unsigned long SEND_INTERVAL = 20000; // 20초 주기 전송
 
 // --- 타이머 변수 ---
 bool is_timer_active = false;
@@ -339,7 +340,7 @@ void displaySettingsCalibManualStatic();
 void displayAutoCalibStatic();           
 void displaySettingsProtectStatic();
 void displayRelayControlStatic();
-void displayCreditSplashStatic(); // [New] 스플래시 함수 프로토타입 (Static_View에 있다고 가정)
+void displayCreditSplashStatic(); 
 void displaySettingsCreditStatic();
 void displayCreditMember1Static();
 void displayCreditMember2Static();
@@ -351,7 +352,7 @@ void displayPresetScreenStatic();
 void displaySettingsTimerStatic();
 void displayConfirmSaveStatic();
 void displayWarningScreenStatic();
-void displayOpeningScreen(); // [New] 오프닝 화면 함수 프로토타입 추가
+void displayOpeningScreen();
 
 void displayMainScreenValues();
 void displayPhaseScreenValues();
@@ -365,79 +366,18 @@ void runRelayControl();
 void runSettingsTheme();
 void displaySettingsTimerValues();
 void runPresetScreen(); 
-void resetViewStates(); // [New] 상태 초기화 함수
+void resetViewStates(); 
 
 void checkTouchInput();
 void checkSerialInput();
 void measureOffsets();     
 void calculateNewGains(float true_v, float true_i); 
 
-// AT 커맨드 헬퍼 함수 (Blocking)
-String sendAT(String command, const int timeout, boolean debug) {
-  String response = "";
-  espSerial.print(command); 
-  long int time = millis();
-  while ((time + timeout) > millis()) {
-    while (espSerial.available()) {
-      char c = espSerial.read();
-      response += c;
-    }
-  }
-  if (debug) {
-    Serial.print(response);
-  }
-  return response;
-}
-
-// WiFi 연결 함수
-bool connectWiFi() {
-  sendAT("AT+CWMODE=1\r\n", 1000, true); 
-  String cmd = "AT+CWJAP=\"" + wifiSSID + "\",\"" + wifiPASS + "\"\r\n";
-  String response = sendAT(cmd, 6000, true); // 타임아웃 유지 (Blocking이지만 단일 시도)
-  if (response.indexOf("OK") != -1 || response.indexOf("WIFI CONNECTED") != -1) {
-    return true;
-  }
-  return false;
-}
-
-// [Mod] 백그라운드 WiFi 처리 (상태 머신)
-void handleNetworkLogic() {
-  // 1. WAIT 상태: 주기적으로 연결 시도
-  if (wifiState == WIFI_WAIT) {
-    if (millis() - lastWifiRetryTime > WIFI_RETRY_INTERVAL) {
-      // 버튼 누른 직후 또는 실패 후 일정 시간 지남
-      lastWifiRetryTime = millis();
-      
-      // 연결 시도 (Blocking 함수지만 1회 실행 후 루프 복귀)
-      if (connectWiFi()) {
-        wifiState = WIFI_CONNECTED_STATE;
-        screenNeedsRedraw = true; // 상태 변경 시 화면 갱신 필요
-      } else {
-        // 실패 시 WAIT 상태 유지, 루프를 돌아 UI 입력(취소) 기회를 줌
-      }
-    }
-  }
-}
-
-// [Mod] ThingSpeak 전송 함수 (간소화됨)
-void sendToThingSpeak() {
-  Serial.println("Sending P_real to ThingSpeak..."); 
-  String cmd = "AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",80\r\n";
-  sendAT(cmd, 2000, false);
-
-  // [Fixed] 항상 P_real(유효전력)을 Field1으로 전송
-  String getStr = "GET /update?api_key=" + apiKey;
-  getStr += "&field1=" + String(P_real);
-  getStr += "\r\n\r\n";
-
-  cmd = "AT+CIPSEND=";
-  cmd += String(getStr.length());
-  cmd += "\r\n";
-  sendAT(cmd, 1000, false);
-
-  sendAT(getStr, 2000, false);
-  sendAT("AT+CIPCLOSE\r\n", 1000, false);
-}
+// [추가] 헬퍼 함수 프로토타입 (하단 구현)
+String sendAT(String command, const int timeout, boolean debug);
+bool connectWiFi();
+void handleNetworkLogic();
+void sendToThingSpeak();
 
 void initDummyHarmonics() {
   for(int i=0; i<=15; i++) {
@@ -452,7 +392,10 @@ void initDummyHarmonics() {
 void setup() {
   Serial.begin(115200);  
   Serial1.begin(115200); // MCU1 통신용
-  espSerial.begin(9600); // ESP-01
+  
+  // [추가] ESP-01 시리얼 초기화 및 리셋
+  espSerial.begin(9600); 
+  sendAT("AT+RST\r\n", 2000, true);
 
   Serial.println("MCU2 Controller (Direct ADC & Serial1) Booting...");
   
@@ -462,8 +405,6 @@ void setup() {
   pinMode(PIN_ADC_I1, INPUT);
   pinMode(PIN_ADC_I2, INPUT);
   
-  sendAT("AT+RST\r\n", 2000, true);
-
   initDummyHarmonics(); 
 
   setTheme(); 
@@ -511,9 +452,11 @@ void loop() {
 
   checkTouchInput(); 
   checkSerialInput(); 
-  handleNetworkLogic(); // [Mod] 백그라운드 네트워크 상태 관리 (WAIT -> ON)
+  
+  // [추가] 네트워크 로직 및 ThingSpeak 전송
+  handleNetworkLogic(); // 백그라운드 네트워크 상태 관리 (WAIT -> ON)
 
-  // [Mod] 화면 상태와 무관하게 연결되어 있다면 항상 전송
+  // 연결 상태이고 전송 주기가 되면 데이터 전송
   if (wifiState == WIFI_CONNECTED_STATE) {
     if (millis() - lastSendTime > SEND_INTERVAL) {
       sendToThingSpeak();
@@ -697,15 +640,88 @@ void calculateNewGains(float true_v, float true_i) {
   float I_rms_adc = sqrt((float)I_sq_sum / samples); 
   
   if (V_rms_adc > 1) {
-    // [Mod] Use hardcoded local variables instead of RX
     V_MULTIPLIER = true_v / (V_rms_adc * BASE_V_CALIB_RMS); 
   }
   if (I_rms_adc > 1) {
-    // [Mod] Use hardcoded local variables instead of RX
     I_MULTIPLIER = true_i / (I_rms_adc * BASE_I_CALIB_RMS); 
   }
   
   temp_V_MULTIPLIER = V_MULTIPLIER;
   temp_I_MULTIPLIER = I_MULTIPLIER;
   settingsChanged = true; 
+}
+
+// ==============================================================================
+// Helper Functions: AT Command & WiFi & ThingSpeak
+// ==============================================================================
+
+// A. sendAT: AT 커맨드 전송 및 응답 수신
+String sendAT(String command, const int timeout, boolean debug) {
+  String response = "";
+  espSerial.print(command); 
+  long int time = millis();
+  while ((time + timeout) > millis()) {
+    while (espSerial.available()) {
+      char c = espSerial.read();
+      response += c;
+    }
+  }
+  if (debug) {
+    Serial.print(response);
+  }
+  return response;
+}
+
+// B. connectWiFi: 와이파이 연결 시도
+bool connectWiFi() {
+  sendAT("AT+CWMODE=1\r\n", 1000, true); 
+  String cmd = "AT+CWJAP=\"" + wifiSSID + "\",\"" + wifiPASS + "\"\r\n";
+  String response = sendAT(cmd, 6000, true); // 최대 6초 대기
+  if (response.indexOf("OK") != -1 || response.indexOf("WIFI CONNECTED") != -1) {
+    return true;
+  }
+  return false;
+}
+
+// C. handleNetworkLogic: 백그라운드 재연결 로직
+void handleNetworkLogic() {
+  if (wifiState == WIFI_WAIT) {
+    // 재연결 주기(WIFI_RETRY_INTERVAL)마다 시도
+    if (millis() - lastWifiRetryTime > WIFI_RETRY_INTERVAL) {
+      lastWifiRetryTime = millis();
+      
+      if (connectWiFi()) {
+        wifiState = WIFI_CONNECTED_STATE;
+        screenNeedsRedraw = true; // 상태 변경 시 화면 갱신
+      } else {
+        // 실패 시 WAIT 상태 유지 (다음 주기에 재시도)
+      }
+    }
+  }
+}
+
+// D. sendToThingSpeak: HTTP GET 요청 전송
+void sendToThingSpeak() {
+  Serial.println("Sending P_real to ThingSpeak..."); 
+  
+  // 1. TCP 연결
+  String cmd = "AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",80\r\n";
+  sendAT(cmd, 2000, false);
+
+  // 2. GET 요청 문자열 생성 (명세에 따른 HTTP/1.1 및 Host 포함)
+  String getStr = "GET /update?api_key=" + apiKey + "&field1=" + String(P_real) + " HTTP/1.1\r\n";
+  getStr += "Host: api.thingspeak.com\r\n";
+  getStr += "Connection: close\r\n\r\n";
+
+  // 3. 데이터 길이 전송
+  cmd = "AT+CIPSEND=";
+  cmd += String(getStr.length());
+  cmd += "\r\n";
+  sendAT(cmd, 1000, false);
+
+  // 4. 실제 데이터 전송
+  sendAT(getStr, 2000, false);
+  
+  // 5. 연결 종료
+  sendAT("AT+CIPCLOSE\r\n", 1000, false);
 }
