@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v216_Mod_Opening (Splash Screen Added)
+ * 버전: v217_Mod_Network (ThingSpeak Failure Logic Added)
  * 설명: 
  * - [Mod] WiFi 연결 로직 전면 수정: 상태 머신 기반 (OFF -> WAIT -> ON)
  * - [Mod] 데이터 전송: 선택 옵션 제거, P(유효전력)값 고정 전송
@@ -13,6 +13,7 @@
  * - [Mod] BASE 교정 값 하드코딩 (MCU1 값과 동일하게 설정, 통신 수신 제거)
  * - [Fix] P/Q 파형 안정화를 위한 전역 정적 버퍼 추가 (Continuous Mode Fix)
  * - [New] 부팅 시 오프닝 화면(SCREEN_OPENING) 추가 및 3초 대기 로직 적용
+ * - [New] 네트워크 연속 실패 감지 로직 추가 (3회 실패 시 재연결 모드로 전환)
  * ==============================================================================
  */
 
@@ -186,6 +187,10 @@ const unsigned long WIFI_RETRY_INTERVAL = 2000; // 재시도 간격
 
 unsigned long lastSendTime = 0; 
 const unsigned long SEND_INTERVAL = 20000; // 20초 주기 전송
+
+// [추가] 실패 감지용 변수
+int wifiFailCount = 0;
+const int MAX_WIFI_FAILURES = 3; // 최대 허용 실패 횟수
 
 // --- 타이머 변수 ---
 bool is_timer_active = false;
@@ -652,7 +657,7 @@ void calculateNewGains(float true_v, float true_i) {
 }
 
 // ==============================================================================
-// Helper Functions: AT Command & WiFi & ThingSpeak
+// Helper Functions: AT Command & WiFi & ThingSpeak (With Failure Count Logic)
 // ==============================================================================
 
 // A. sendAT: AT 커맨드 전송 및 응답 수신
@@ -672,12 +677,13 @@ String sendAT(String command, const int timeout, boolean debug) {
   return response;
 }
 
-// B. connectWiFi: 와이파이 연결 시도
+// B. connectWiFi: 와이파이 연결 시도 (성공 시 카운터 리셋)
 bool connectWiFi() {
   sendAT("AT+CWMODE=1\r\n", 1000, true); 
   String cmd = "AT+CWJAP=\"" + wifiSSID + "\",\"" + wifiPASS + "\"\r\n";
   String response = sendAT(cmd, 6000, true); // 최대 6초 대기
   if (response.indexOf("OK") != -1 || response.indexOf("WIFI CONNECTED") != -1) {
+    wifiFailCount = 0; // [중요] 연결 성공 시 실패 카운터 초기화
     return true;
   }
   return false;
@@ -700,28 +706,55 @@ void handleNetworkLogic() {
   }
 }
 
-// D. sendToThingSpeak: HTTP GET 요청 전송
+// D. sendToThingSpeak: 연속 실패 감지 로직 적용
 void sendToThingSpeak() {
   Serial.println("Sending P_real to ThingSpeak..."); 
   
-  // 1. TCP 연결
+  // 1. TCP 연결 시도
   String cmd = "AT+CIPSTART=\"TCP\",\"api.thingspeak.com\",80\r\n";
-  sendAT(cmd, 2000, false);
+  String startResp = sendAT(cmd, 2000, false);
 
-  // 2. GET 요청 문자열 생성 (명세에 따른 HTTP/1.1 및 Host 포함)
+  // 2. [핵심] 연결 상태 검증 및 카운터 처리
+  bool isConnected = false;
+  if (startResp.indexOf("CONNECT") != -1 || startResp.indexOf("OK") != -1) {
+      isConnected = true;
+  }
+  // 명시적 에러 또는 실패 응답 확인
+  if (startResp.indexOf("ERROR") != -1 || startResp.indexOf("CLOSED") != -1 || startResp.indexOf("FAIL") != -1) {
+      isConnected = false;
+  }
+
+  if (!isConnected) {
+      wifiFailCount++; // 실패 카운트 증가
+      Serial.print("Connection Failed. Count: "); Serial.println(wifiFailCount);
+
+      // 최대 실패 횟수 초과 시
+      if (wifiFailCount >= MAX_WIFI_FAILURES) {
+          Serial.println("Max failures reached. Switching to WIFI_WAIT.");
+          wifiState = WIFI_WAIT;    // 재연결 모드로 전환
+          wifiFailCount = 0;        // 카운터 초기화
+          screenNeedsRedraw = true; // 화면 갱신 요청 (상태 표시 변경)
+      }
+      return; // 전송 중단
+  }
+
+  // 연결 성공 시 카운터 초기화
+  wifiFailCount = 0; 
+
+  // 3. 데이터 전송 (연결 성공 시에만 실행)
   String getStr = "GET /update?api_key=" + apiKey + "&field1=" + String(P_real) + " HTTP/1.1\r\n";
   getStr += "Host: api.thingspeak.com\r\n";
   getStr += "Connection: close\r\n\r\n";
 
-  // 3. 데이터 길이 전송
+  // 데이터 길이 전송
   cmd = "AT+CIPSEND=";
   cmd += String(getStr.length());
   cmd += "\r\n";
   sendAT(cmd, 1000, false);
 
-  // 4. 실제 데이터 전송
+  // 실제 데이터 전송
   sendAT(getStr, 2000, false);
   
-  // 5. 연결 종료
+  // 연결 종료
   sendAT("AT+CIPCLOSE\r\n", 1000, false);
 }
