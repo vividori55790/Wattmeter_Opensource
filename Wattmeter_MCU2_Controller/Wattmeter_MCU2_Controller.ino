@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 1. Wattmeter_MCU2_Controller.ino
- * 버전: v217_Mod_Network (ThingSpeak Failure Logic Added)
+ * 버전: v217_Mod_Network (ThingSpeak Failure Logic Added) + WiFi Config WebServer
  * 설명: 
  * - [Mod] WiFi 연결 로직 전면 수정: 상태 머신 기반 (OFF -> WAIT -> ON)
  * - [Mod] 데이터 전송: 선택 옵션 제거, P(유효전력)값 고정 전송
@@ -14,6 +14,7 @@
  * - [Fix] P/Q 파형 안정화를 위한 전역 정적 버퍼 추가 (Continuous Mode Fix)
  * - [New] 부팅 시 오프닝 화면(SCREEN_OPENING) 추가 및 3초 대기 로직 적용
  * - [New] 네트워크 연속 실패 감지 로직 추가 (3회 실패 시 재연결 모드로 전환)
+ * - [New] WiFi 설정용 SoftAP 및 웹서버 기능 추가 (SCREEN_WIFI_CONFIG)
  * ==============================================================================
  */
 
@@ -25,6 +26,29 @@
 #include <ArduinoJson.h>
 #include <SoftwareSerial.h> // ESP-01 통신용
 #include <EEPROM.h>         // 프리셋 저장용
+
+// --- [추가] 네트워크 설정 저장용 구조체 및 상수 ---
+struct NetworkSettings {
+  char ssid[32];
+  char pass[32];
+  char apikey[32];
+  bool valid;
+};
+const int EEPROM_NET_ADDR = 400;
+
+// --- [추가] 웹서버용 HTML 페이지 ---
+const char HTML_WIFI_CONFIG[] PROGMEM = 
+"<!DOCTYPE html><html><head><meta name='viewport' content='width=device-width, initial-scale=1'>"
+"<style>body{font-family:Arial;padding:20px;background:#f2f2f2}input{width:100%;padding:10px;margin:5px 0;}"
+"input[type=submit]{background:#4CAF50;color:white;border:none;cursor:pointer;padding:15px;width:100%;font-size:16px;}</style></head>"
+"<body><h2>Wattmeter WiFi Setup</h2>"
+"<form action='/save' method='get'>"
+"<label>SSID:</label><input type='text' name='ssid' placeholder='Enter SSID'><br>"
+"<label>Password:</label><input type='text' name='pass' placeholder='Enter Password'><br>"
+"<label>API Key:</label><input type='text' name='apikey' placeholder='ThingSpeak API Key'><br>"
+"<input type='submit' value='SAVE & REBOOT'>"
+"</form></body></html>";
+
 
 // --- 화면 상태 정의 ---
 enum ScreenState {
@@ -52,7 +76,8 @@ enum ScreenState {
   SCREEN_SETTINGS_CREDIT,
   SCREEN_CREDIT_MEMBER_1,
   SCREEN_CREDIT_MEMBER_2,
-  SCREEN_CREDIT_MEMBER_3
+  SCREEN_CREDIT_MEMBER_3,
+  SCREEN_WIFI_CONFIG   // [추가] WiFi 설정 화면 상태
 };
 // [Mod] 초기 상태를 SCREEN_OPENING으로 변경
 volatile ScreenState currentScreen = SCREEN_OPENING; 
@@ -358,6 +383,7 @@ void displaySettingsTimerStatic();
 void displayConfirmSaveStatic();
 void displayWarningScreenStatic();
 void displayOpeningScreen();
+void displayWiFiConfigScreenStatic(); // [추가]
 
 void displayMainScreenValues();
 void displayPhaseScreenValues();
@@ -378,11 +404,14 @@ void checkSerialInput();
 void measureOffsets();     
 void calculateNewGains(float true_v, float true_i); 
 
-// [추가] 헬퍼 함수 프로토타입 (하단 구현)
+// [추가] 헬퍼 함수 프로토타입
 String sendAT(String command, const int timeout, boolean debug);
 bool connectWiFi();
 void handleNetworkLogic();
 void sendToThingSpeak();
+
+void enableSoftAP();      // [추가]
+void handleWebServer();   // [추가]
 
 void initDummyHarmonics() {
   for(int i=0; i<=15; i++) {
@@ -404,6 +433,18 @@ void setup() {
 
   Serial.println("MCU2 Controller (Direct ADC & Serial1) Booting...");
   
+  // [추가] EEPROM에서 네트워크 설정 로드
+  NetworkSettings netSettings;
+  EEPROM.get(EEPROM_NET_ADDR, netSettings);
+  if (netSettings.valid) {
+    wifiSSID = String(netSettings.ssid);
+    wifiPASS = String(netSettings.pass);
+    apiKey = String(netSettings.apikey);
+    Serial.println("Network settings loaded from EEPROM.");
+  } else {
+    Serial.println("No valid network settings in EEPROM.");
+  }
+
   analogReadResolution(ADC_RESOLUTION_BITS); 
   pinMode(PIN_ADC_V, INPUT);
   pinMode(PIN_ADC_I, INPUT);
@@ -456,6 +497,15 @@ void loop() {
   // ========================================================================
 
   checkTouchInput(); 
+  
+  // [수정] WiFi 설정 모드일 경우 웹서버 처리만 수행하고 나머지 로직 건너뜀 (안정성 확보)
+  if (currentScreen == SCREEN_WIFI_CONFIG) {
+    handleWebServer(); 
+    // 설정 화면에서도 Serial1 데이터(측정값)는 계속 수신하여 백그라운드 값 갱신 (선택사항)
+    // checkSerialInput(); 
+    return; 
+  }
+
   checkSerialInput(); 
   
   // [추가] 네트워크 로직 및 ThingSpeak 전송
@@ -588,6 +638,7 @@ void loop() {
         case SCREEN_CREDIT_MEMBER_1: displayCreditMember1Static(); break;
         case SCREEN_CREDIT_MEMBER_2: displayCreditMember2Static(); break;
         case SCREEN_CREDIT_MEMBER_3: displayCreditMember3Static(); break;
+        case SCREEN_WIFI_CONFIG: displayWiFiConfigScreenStatic(); break; // [추가]
       }
     }
     screenNeedsRedraw = false; 
@@ -606,6 +657,7 @@ void loop() {
     case SCREEN_SETTINGS_THEME: runSettingsTheme(); break;
     case SCREEN_SETTINGS_TIMER: displaySettingsTimerValues(); break;
     case SCREEN_SETTINGS_PRESETS: runPresetScreen(); break; 
+    case SCREEN_WIFI_CONFIG: handleWebServer(); break; // [추가] 웹 요청 처리
     default: break;
   }
 }
@@ -757,4 +809,90 @@ void sendToThingSpeak() {
   
   // 연결 종료
   sendAT("AT+CIPCLOSE\r\n", 1000, false);
+}
+
+// ==============================================================================
+// [추가] SoftAP 및 웹서버 처리 함수
+// ==============================================================================
+
+// SoftAP 모드 활성화 (화면 진입 시 1회 호출됨)
+void enableSoftAP() {
+  wifiState = WIFI_OFF; // 백그라운드 재연결 로직 간섭 방지
+  
+  Serial.println("[System] Enabling SoftAP Mode for Config...");
+  sendAT("AT+CWMODE=2\r\n", 1000, true); // SoftAP Mode
+  
+  // SSID: Wattmeter_Setup, No Pass, Ch 1, Open(0)
+  sendAT("AT+CWSAP=\"Wattmeter_Setup\",\"\",1,0\r\n", 2000, true); 
+  
+  sendAT("AT+CIPMUX=1\r\n", 1000, true); // Multiple connections
+  sendAT("AT+CIPSERVER=1,80\r\n", 1000, true); // Start Server on port 80
+  
+  Serial.println("[System] SoftAP Started: Wattmeter_Setup (IP: 192.168.4.1)");
+}
+
+// 웹 요청 처리 (loop 내에서 반복 호출됨)
+void handleWebServer() {
+  if (espSerial.available()) {
+    if (espSerial.find("+IPD,")) {
+      int linkId = espSerial.read() - '0';
+      espSerial.find(":");
+      String req = espSerial.readStringUntil('\r');
+      
+      // 버퍼 비우기
+      while(espSerial.available()) espSerial.read();
+
+      if (req.indexOf("GET / ") != -1) {
+        // HTML 페이지 전송
+        String html = FPSTR(HTML_WIFI_CONFIG);
+        String header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " + String(html.length()) + "\r\nConnection: close\r\n\r\n";
+        
+        String sendCmd = "AT+CIPSEND=" + String(linkId) + "," + String(header.length() + html.length()) + "\r\n";
+        espSerial.print(sendCmd);
+        delay(300); // Wait for >
+        espSerial.print(header);
+        espSerial.print(html);
+        delay(100);
+        espSerial.print("AT+CIPCLOSE=" + String(linkId) + "\r\n");
+      }
+      else if (req.indexOf("GET /save") != -1) {
+         // 파라미터 파싱: GET /save?ssid=...&pass=...&apikey=...
+         auto extractParam = [&](String key) -> String {
+           int start = req.indexOf(key + "=");
+           if (start == -1) return "";
+           start += key.length() + 1;
+           int end = req.indexOf("&", start);
+           if (end == -1) end = req.indexOf(" ", start);
+           return req.substring(start, end);
+         };
+
+         String s = extractParam("ssid");
+         String p = extractParam("pass");
+         String k = extractParam("apikey");
+         
+         if (s.length() > 0) {
+           NetworkSettings newSettings;
+           s.toCharArray(newSettings.ssid, 32);
+           p.toCharArray(newSettings.pass, 32);
+           k.toCharArray(newSettings.apikey, 32);
+           newSettings.valid = true;
+           
+           EEPROM.put(EEPROM_NET_ADDR, newSettings);
+           Serial.println("[System] New Network Settings Saved to EEPROM.");
+           
+           String msg = "Settings Saved! Rebooting...";
+           String header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + String(msg.length()) + "\r\n\r\n";
+           
+           espSerial.print("AT+CIPSEND=" + String(linkId) + "," + String(header.length() + msg.length()) + "\r\n");
+           delay(300);
+           espSerial.print(header);
+           espSerial.print(msg);
+           delay(1000);
+           
+           // 소프트웨어 리셋 (ARM Cortex-M 용)
+           NVIC_SystemReset(); 
+         }
+      }
+    }
+  }
 }

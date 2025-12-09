@@ -339,6 +339,15 @@ void checkTouchInput() {
       isPhaseFrozen = false;
       isHarmonicsFrozen = false;
       
+      // [Mod] WIFI CONFIG 화면에서 뒤로가기 시 Station 모드 복구 로직 추가
+      if (currentScreen == SCREEN_WIFI_CONFIG) {
+          sendAT("AT+CWMODE=1\r\n", 1000, true); // Station 모드로 복귀
+          currentScreen = SCREEN_SETTINGS_NETWORK;
+          screenNeedsRedraw = true;
+          delay(100);
+          return;
+      }
+
       if (currentScreen == SCREEN_SETTINGS_CALIB_MENU || currentScreen == SCREEN_SETTINGS_CALIB_MANUAL || currentScreen == SCREEN_SETTINGS_CALIB_AUTO) {
         if ((currentScreen == SCREEN_SETTINGS_CALIB_MANUAL) && settingsChanged) { // AUTO 화면 뒤로가기 시 저장/버리기 팝업 비활성화 [User Request]
            previousScreen = currentScreen; currentScreen = SCREEN_CONFIRM_SAVE;
@@ -466,12 +475,20 @@ void checkTouchInput() {
 
     case SCREEN_SETTINGS_NETWORK: 
       if (is_new_touch) {
+          // Existing "Send to Thingspeak" Button
           if (p.x >= 55 && p.x <= 265 && p.y >= 45 && p.y <= 105) {
             if (wifiState == WIFI_OFF) { wifiState = WIFI_WAIT; lastWifiRetryTime = 0; screenNeedsRedraw = true; } 
             else if (wifiState == WIFI_WAIT) { wifiState = WIFI_OFF; screenNeedsRedraw = true; } 
             else if (wifiState == WIFI_CONNECTED_STATE) { sendAT("AT+CWQAP\r\n", 1000, true); wifiState = WIFI_OFF; screenNeedsRedraw = true; }
             delay(150); 
-          } 
+          }
+          // [New] WEB CONFIG MODE Button
+          else if (p.x >= 20 && p.x <= 300 && p.y >= 140 && p.y <= 180) {
+            currentScreen = SCREEN_WIFI_CONFIG;
+            enableSoftAP(); // SoftAP 모드 활성화
+            screenNeedsRedraw = true;
+            delay(150);
+          }
       }
       break;
 

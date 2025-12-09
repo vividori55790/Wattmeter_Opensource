@@ -1,7 +1,7 @@
 /*
  * ==============================================================================
  * 파일명: 2. Static_View.ino
- * 버전: v214_Mod_UI (Credit UI Improved)
+ * 버전: v214_Mod_UI (Credit UI Improved + WiFi Config Added)
  * 설명: 
  * - [Mod] Harmonics Screen: 그래프 영역 최적화 및 Y축 단위 즉시 반영 구조
  * - [Mod] X축 라벨: 1, 3, 5 ... 15 홀수 차수 표시
@@ -9,6 +9,8 @@
  * - [Mod] Settings UI 변경 (5버튼 배열) 및 Advanced UI 변경 (2x2 그리드)
  * - [New] Credit Splash Screen & Member Profile Card UI Design
  * - [Fix] Profile Card Comment Multi-line Center Alignment
+ * - [New] Network Settings 화면에 "WEB CONFIG MODE" 버튼 추가
+ * - [New] WiFi SoftAP 설정 안내 화면 (displayWiFiConfigScreenStatic) 추가
  * ==============================================================================
  */
 
@@ -463,6 +465,38 @@ void displaySettingsNetworkStatic() {
   tft.setCursor(20, 115);
   tft.setTextColor(COLOR_TEXT_PRIMARY);
   tft.print("Send to Thingspeak");
+
+  // [New] Web Config Button added
+  drawButton(20, 140, 280, 40, "WEB CONFIG MODE");
+}
+
+// [New] WiFi Configuration Screen
+void displayWiFiConfigScreenStatic() {
+  tft.setCursor(65, 10);
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setTextSize(2);
+  tft.println("WIFI CONFIG MODE");
+  drawBackButton();
+
+  tft.setTextSize(2);
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+
+  // Guide Step 1
+  tft.setCursor(20, 60);
+  tft.println("1. Connect to WiFi:");
+
+  tft.setCursor(40, 85);
+  tft.setTextColor(COLOR_BLUE); // Highlight with Theme Color
+  tft.println("SSID: Wattmeter_Setup");
+
+  // Guide Step 2
+  tft.setTextColor(COLOR_TEXT_PRIMARY);
+  tft.setCursor(20, 125);
+  tft.println("2. Open Browser:");
+
+  tft.setCursor(40, 150);
+  tft.setTextColor(COLOR_ORANGE); // Highlight with Theme Color
+  tft.println("192.168.4.1");
 }
 
 void displaySettingsCalibMenuStatic() {
