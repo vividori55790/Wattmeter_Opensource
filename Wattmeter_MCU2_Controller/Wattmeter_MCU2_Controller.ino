@@ -844,7 +844,7 @@ void handleWebServer() {
 
       if (req.indexOf("GET / ") != -1) {
         // HTML 페이지 전송
-        String html = FPSTR(HTML_WIFI_CONFIG);
+        String html = String((const __FlashStringHelper*)HTML_WIFI_CONFIG); // [Fix] FPSTR 제거 및 Arduino 호환 캐스팅 적용
         String header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " + String(html.length()) + "\r\nConnection: close\r\n\r\n";
         
         String sendCmd = "AT+CIPSEND=" + String(linkId) + "," + String(header.length() + html.length()) + "\r\n";
