@@ -15,6 +15,7 @@
  * - [New] 부팅 시 오프닝 화면(SCREEN_OPENING) 추가 및 3초 대기 로직 적용
  * - [New] 네트워크 연속 실패 감지 로직 추가 (3회 실패 시 재연결 모드로 전환)
  * - [New] WiFi 설정용 SoftAP 및 웹서버 기능 추가 (SCREEN_WIFI_CONFIG)
+ * * [Update] 메모리 최적화를 위해 enableSoftAP() 및 handleWebServer() 로직 교체 (PROGMEM Streaming)
  * ==============================================================================
  */
 
@@ -812,51 +813,102 @@ void sendToThingSpeak() {
 }
 
 // ==============================================================================
-// [추가] SoftAP 및 웹서버 처리 함수
+// [추가] SoftAP 및 웹서버 처리 함수 (최적화 버전 교체 완료)
 // ==============================================================================
 
-// SoftAP 모드 활성화 (화면 진입 시 1회 호출됨)
+// 1. SoftAP 모드 활성화 함수 (안정성 강화 버전)
 void enableSoftAP() {
-  wifiState = WIFI_OFF; // 백그라운드 재연결 로직 간섭 방지
+  Serial.println(F("[System] Enabling SoftAP Mode (Optimized)..."));
+  // 1. SoftAP 모드 설정 (Mode 2)
+  sendAT("AT+CWMODE=2\r\n", 1000, true);
+  // 2. AP 정보 설정 (SSID: Wattmeter_Setup, No Pass, Ch 1, Open)
+  sendAT("AT+CWSAP=\"Wattmeter_Setup\",\"\",1,0\r\n", 2000, true);
+  // 3. 다중 연결 허용 (서버 모드 필수)
+  sendAT("AT+CIPMUX=1\r\n", 1000, true);
+  // 4. 포트 80 서버 시작
+  sendAT("AT+CIPSERVER=1,80\r\n", 1000, true); 
   
-  Serial.println("[System] Enabling SoftAP Mode for Config...");
-  sendAT("AT+CWMODE=2\r\n", 1000, true); // SoftAP Mode
-  
-  // SSID: Wattmeter_Setup, No Pass, Ch 1, Open(0)
-  sendAT("AT+CWSAP=\"Wattmeter_Setup\",\"\",1,0\r\n", 2000, true); 
-  
-  sendAT("AT+CIPMUX=1\r\n", 1000, true); // Multiple connections
-  sendAT("AT+CIPSERVER=1,80\r\n", 1000, true); // Start Server on port 80
-  
-  Serial.println("[System] SoftAP Started: Wattmeter_Setup (IP: 192.168.4.1)");
+  Serial.println(F("[System] SoftAP Started. Connect to 'Wattmeter_Setup'"));
+  Serial.println(F("[System] Then browse to http://192.168.4.1"));
 }
 
-// 웹 요청 처리 (loop 내에서 반복 호출됨)
+// 2. 웹 서버 핸들러 (메모리 최적화 및 PROGMEM 스트리밍 적용 버전)
 void handleWebServer() {
   if (espSerial.available()) {
+    // "+IPD," 문자열 감지
     if (espSerial.find("+IPD,")) {
-      int linkId = espSerial.read() - '0';
-      espSerial.find(":");
-      String req = espSerial.readStringUntil('\r');
       
-      // 버퍼 비우기
-      while(espSerial.available()) espSerial.read();
+      // ID 수신 대기 (안전한 읽기)
+      long timeoutWait = millis() + 200;
+      while (!espSerial.available() && millis() < timeoutWait) { delay(1); }
 
-      if (req.indexOf("GET / ") != -1) {
-        // HTML 페이지 전송
-        String html = String((const __FlashStringHelper*)HTML_WIFI_CONFIG); // [Fix] FPSTR 제거 및 Arduino 호환 캐스팅 적용
-        String header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " + String(html.length()) + "\r\nConnection: close\r\n\r\n";
-        
-        String sendCmd = "AT+CIPSEND=" + String(linkId) + "," + String(header.length() + html.length()) + "\r\n";
-        espSerial.print(sendCmd);
-        delay(300); // Wait for >
-        espSerial.print(header);
-        espSerial.print(html);
-        delay(100);
-        espSerial.print("AT+CIPCLOSE=" + String(linkId) + "\r\n");
+      if (!espSerial.available()) return;
+      
+      int idChar = espSerial.read();
+      int linkId = idChar - '0';
+
+      // 유효성 검사 (0~4번 연결만 허용)
+      if (linkId < 0 || linkId > 4) {
+          return; 
       }
+
+      espSerial.find(":"); // 데이터 시작점 찾기
+      
+      // 요청 라인 읽기
+      String req = espSerial.readStringUntil('\r');
+
+      // 잔여 데이터 플러시 (버퍼 비우기)
+      long timeout = millis() + 500;
+      while (millis() < timeout) {
+        if (espSerial.available()) {
+          espSerial.read();
+          timeout = millis() + 200; 
+        }
+      }
+
+      // 1. 메인 페이지 요청 (GET / )
+      if (req.indexOf("GET / ") != -1) {
+        Serial.println(F("[Web] Serving Main Page (PROGMEM Stream)"));
+        
+        // 메모리 최적화: HTML 본문을 String에 담지 않고, 헤더 먼저 전송 후 본문 스트리밍
+        int htmlLen = strlen_P(HTML_WIFI_CONFIG);
+        String header = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: " + String(htmlLen) + "\r\nConnection: close\r\n\r\n";
+        int totalLen = header.length() + htmlLen;
+
+        // 전송 길이 설정
+        String sendCmd = "AT+CIPSEND=" + String(linkId) + "," + String(totalLen) + "\r\n";
+        espSerial.print(sendCmd);
+        
+        // ">" 프롬프트 대기
+        bool promptFound = false;
+        long waitTimeout = millis() + 3000;
+        while(millis() < waitTimeout) {
+          if(espSerial.available()) {
+            if(espSerial.read() == '>') {
+              promptFound = true;
+              break;
+            }
+          }
+        }
+
+        // 데이터 전송
+        if (promptFound) {
+            espSerial.print(header); // 헤더 전송
+            // HTML 본문을 PROGMEM에서 1바이트씩 읽어 직접 전송 (RAM 절약 핵심)
+            for(int i=0; i<htmlLen; i++) {
+              char c = pgm_read_byte(HTML_WIFI_CONFIG + i);
+              espSerial.write(c);
+            }
+        }
+        
+        delay(500); // 전송 완료 대기
+        String closeCmd = "AT+CIPCLOSE=" + String(linkId) + "\r\n";
+        espSerial.print(closeCmd);
+      }
+      // 2. 설정 저장 요청 (GET /save)
       else if (req.indexOf("GET /save") != -1) {
-         // 파라미터 파싱: GET /save?ssid=...&pass=...&apikey=...
+         Serial.println(F("[Web] Saving Settings..."));
+         
          auto extractParam = [&](String key) -> String {
            int start = req.indexOf(key + "=");
            if (start == -1) return "";
@@ -878,20 +930,39 @@ void handleWebServer() {
            newSettings.valid = true;
            
            EEPROM.put(EEPROM_NET_ADDR, newSettings);
-           Serial.println("[System] New Network Settings Saved to EEPROM.");
            
            String msg = "Settings Saved! Rebooting...";
-           String header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + String(msg.length()) + "\r\n\r\n";
+           String header = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " + String(msg.length()) + "\r\nConnection: close\r\n\r\n";
+           int totalLen = header.length() + msg.length();
            
-           espSerial.print("AT+CIPSEND=" + String(linkId) + "," + String(header.length() + msg.length()) + "\r\n");
-           delay(300);
-           espSerial.print(header);
-           espSerial.print(msg);
+           String sendCmd = "AT+CIPSEND=" + String(linkId) + "," + String(totalLen) + "\r\n";
+           espSerial.print(sendCmd);
+           
+           bool promptFound = false;
+           long waitTimeout = millis() + 3000;
+           while(millis() < waitTimeout) {
+             if(espSerial.available()) {
+               if(espSerial.read() == '>') { promptFound = true; break; }
+             }
+           }
+           
+           if (promptFound) {
+               espSerial.print(header);
+               espSerial.print(msg);
+           }
+           
            delay(1000);
+           String closeCmd = "AT+CIPCLOSE=" + String(linkId) + "\r\n";
+           espSerial.print(closeCmd);
            
-           // 소프트웨어 리셋 (ARM Cortex-M 용)
-           NVIC_SystemReset(); 
+           delay(2000);
+           NVIC_SystemReset(); // 시스템 리셋
          }
+      }
+      // 3. 기타 요청 -> 연결 종료
+      else {
+          String closeCmd = "AT+CIPCLOSE=" + String(linkId) + "\r\n";
+          espSerial.print(closeCmd);
       }
     }
   }
