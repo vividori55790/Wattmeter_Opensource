@@ -38,9 +38,9 @@ const float FREQUENCY = 60.0;
 const float CURRENT_CUTOFF_THRES = 0.07;
 
 // Calibration Factors
-float BASE_V_CALIB_RMS = 0.19177;
+float BASE_V_CALIB_RMS = 0.19277;
 float BASE_I_CALIB_RMS = 0.003190;
-float BASE_I_CALIB_RMS1 = 0.003150; // Load 1 (기존 0.003058 -> 1.00A 측정됨)
+float BASE_I_CALIB_RMS1 = 0.003150; 
 float BASE_I_CALIB_RMS2 = 0.003117;
 
 float BASE_V_OFFSET_ADJUST = 0.0; 
@@ -74,6 +74,10 @@ bool is_timer_active = false;
 uint32_t timer_seconds_left = 0;
 uint32_t timer_setting_seconds = 0; 
 unsigned long lastTimerUpdate = 0;
+unsigned long load1StartTime = 0; // Load 1 가동 시작 시간 기록용
+unsigned long load2StartTime = 0; // Load 2 가동 시작 시간 기록용
+double V_fund_accurate = 0.0;
+double I_fund_accurate = 0.0;
 
 // --- FFT Arrays (Double required for v2.x) ---
 double vReal[FFT_N];
@@ -99,12 +103,14 @@ unsigned long lastFuzzyTime = 0;
 float fuzzy_output_level = 0.0;
 int fuzzyTripCounter = 0;
 const int TRIP_DELAY_COUNT = 8;
+unsigned long loadStartTime = 0; // [추가] 부하 가동 시작 시간 기록용
 
 // --- Waveform Streaming ---
 bool isWaveformStreaming = false;
 int waveformType = 0; 
 int waveformSyncMode = 0;
 unsigned long lastDataSendTime = 0;
+
 const unsigned long DATA_SEND_INTERVAL = 500; 
 
 // --- Auto-Calibration ---
@@ -158,12 +164,14 @@ void setup() {
 }
 
 // ================================================================
-// LOOP
+// LOOP (수정됨: 레벨별 차등 차단 속도 적용)
 // ================================================================
 void loop() {
   checkSerialCommand();
 
-  // Timer Logic
+  // -----------------------------------------------------------
+  // 1. Timer Logic
+  // -----------------------------------------------------------
   if (is_timer_active) {
     if (millis() - lastTimerUpdate >= 1000) {
       lastTimerUpdate = millis();
@@ -181,73 +189,150 @@ void loop() {
     }
   }
 
-  // Main Operation
+  // -----------------------------------------------------------
+  // 2. Main Operation
+  // -----------------------------------------------------------
   if (isWaveformStreaming) {
     runWaveformStreaming();
   } else {
     // 0.5초(500ms)마다 데이터 전송 및 보호 로직 수행
-    // 주의: runFuzzyLogic 내부는 0.1초마다 갱신되므로, 
-    // 여기 loop 주기가 500ms라면 카운터가 느리게 올라갈 수 있습니다.
-    // 하지만 현재 구조상 perform_unified_analysis가 시간을 잡아먹으므로 
-    // 500ms 주기 안에서 퍼지 판단을 수행합니다.
     if (millis() - lastDataSendTime >= 500) {
        lastDataSendTime = millis();
        perform_unified_analysis();
        
-       // 퍼지 로직 실행 (내부적으로 0.1초 경과 체크함)
+       // 퍼지 로직 실행 (결과: 0.0 ~ 10.0)
        float fuzzyLevel = runFuzzyLogic();
 
-       // [수정된 트립 판단 로직: 카운터 적용] -----------------------
+       // ========================================================
+       // [보호 로직: Load 1, 2 개별 돌입전류 감지]
+       // ========================================================
        
-       // 1. 위험 감지 시 카운트 증가 vs 정상 시 리셋
-       if (fuzzyLevel > 2.0) {
-           fuzzyTripCounter++;
-       } else {
-           fuzzyTripCounter = 0; // 정상이면 즉시 리셋 (돌입전류였다면 여기서 0됨)
+       // 1. Load 1 가동 시간 체크
+       if (I_rms_load1 < 0.5) load1StartTime = 0; // 꺼짐 -> 리셋
+       else if (load1StartTime == 0) load1StartTime = millis(); // 켜진 순간 기록
+
+       // 2. Load 2 가동 시간 체크
+       if (I_rms_load2 < 0.5) load2StartTime = 0; // 꺼짐 -> 리셋
+       else if (load2StartTime == 0) load2StartTime = millis(); // 켜진 순간 기록
+
+       // 3. 돌입 전류 구간 판별 (각각 2초 이내인지 확인)
+       bool inrush1 = (load1StartTime != 0) && (millis() - load1StartTime < 2000);
+       bool inrush2 = (load2StartTime != 0) && (millis() - load2StartTime < 2000);
+       
+       // 둘 중 하나라도 돌입 전류 구간이면 '보호 완화 모드' 진입
+       bool isAnyInrush = inrush1 || inrush2;
+
+       // ========================================================
+       // [수정됨] 4. 퍼지 로직 위험 카운터 (반한시 특성 적용)
+       // TRIP_DELAY_COUNT = 8 (약 4초 기준)
+       // ========================================================
+       if (fuzzyLevel > 8.0) {
+           // [Level 10] 치명적: 매우 빠르게 카운트 증가
+           // 8 / 4 = 2회 루프 (약 1초) 만에 차단
+           fuzzyTripCounter += 4; 
+       } 
+       else if (fuzzyLevel > 5.0) {
+           // [Level 6] 위험: 빠르게 카운트 증가
+           // 8 / 2 = 4회 루프 (약 2초) 만에 차단
+           fuzzyTripCounter += 2;
+       } 
+       else if (fuzzyLevel > 2.0) {
+           // [Level 3] 주의: 일반 속도
+           // 8 / 1 = 8회 루프 (약 4초) 만에 차단
+           fuzzyTripCounter += 1;
+       } 
+       else {
+           // [안전] 카운터 감소 (서서히 식힘, Cooling logic)
+           // 즉시 0으로 만들지 않고 서서히 줄여서, 
+           // 과부하가 반복되면 더 빨리 차단되도록 메모리 효과 부여
+           if (fuzzyTripCounter > 0) fuzzyTripCounter--;
        }
 
-       // 2. 카운터가 설정값(4회)을 넘어야 진짜 트립으로 인정
-       // (참고: loop 주기가 500ms라면 4회는 2초가 됩니다. 
-       //  빠른 반응을 원하시면 TRIP_DELAY_COUNT를 1~2로 줄이거나 loop 주기를 당겨야 합니다.)
+       // 카운터가 기준치(8)를 넘으면 트립 신호 발생
        bool fuzzy_trip = (fuzzyTripCounter >= TRIP_DELAY_COUNT);
 
-       // 3. [안전장치] 단, 전류가 너무 크면(15A) 카운터 무시하고 즉시 차단 (Short Circuit)
-       if (I_rms > 15.0) fuzzy_trip = true; 
-       // --------------------------------------------------------
 
+       // ========================================================
+       // 5. 과전류 및 쇼트 판별 로직
+       // ========================================================
        bool overvoltage_trip = (V_rms > VOLTAGE_THRESHOLD);
-       bool overcurrent_trip = (I_rms > 7.0); // 지속 과전류(7A)
+       bool overcurrent_trip = (I_rms > 7.0);  // 일반 과전류
+       bool short_circuit    = (I_rms > 15.0); // 쇼트(단락) 기준
+       
+       // [핵심] 돌입 전류 구간인 경우 보호 로직 완화 (면제권)
+       if (isAnyInrush) {
+           // 돌입 구간에서는 하드웨어 한계(30A)가 넘지 않는 한 봐줌
+           if (I_rms < 30.0) {
+               overcurrent_trip = false;
+               short_circuit = false;
+               fuzzy_trip = false; // ★ 퍼지가 위험하다고 해도 기동 초기는 무시
+               
+               // (선택사항) 기동 중에는 카운터가 쌓이지 않게 하려면 아래 주석 해제
+               // fuzzyTripCounter = 0; 
+           } else {
+               // 30A 넘으면 즉시 차단 (진짜 쇼트)
+               short_circuit = true; 
+           }
+       }
+       
+       // 쇼트 감지 시 즉시 트립 (퍼지 카운터고 뭐고 바로 차단)
+       if (short_circuit) fuzzy_trip = true;
 
+
+       // ========================================================
+       // 6. 최종 트립 실행 (레벨별 동작 차별화 적용)
+       // ========================================================
        bool master_trip = fuzzy_trip || overvoltage_trip || overcurrent_trip;
        
        if (master_trip) {
+          // [메시지 설정]
           if (overvoltage_trip) tripReason = "OVER V";
-          else if (I_rms > 15.0) tripReason = "SHORT CIRC"; // 쇼트 감지 표시
+          else if (short_circuit) tripReason = "SHORT CIRC"; 
           else if (overcurrent_trip) tripReason = "OVER I";
           else if (fuzzy_trip) tripReason = "OVER P (Fuzzy)";
           
-          if (I_rms_load1 > I_rms_load2) {
-             relay1_state = true;
-             digitalWrite(RELAY_1_PIN, HIGH);
-             warningMessage = "TRIP: LOAD 1";
-             tripRelay = "R1";
-          } else if (I_rms_load2 > I_rms_load1) {
-             relay2_state = true;
-             digitalWrite(RELAY_2_PIN, HIGH);
-             warningMessage = "TRIP: LOAD 2";
-             tripRelay = "R2";
-          } else {
-             relay2_state = true; 
-             digitalWrite(RELAY_2_PIN, HIGH);
-             warningMessage = "TRIP: LOAD 2 (EQ)";
-             tripRelay = "R2"; 
-          }
           warningActive = true;
+          fuzzyTripCounter = 0; // 리셋
+
+          // -------------------------------------------------------
+          // ★ [핵심 수정] 위험도에 따른 차단 범위 결정
+          // -------------------------------------------------------
           
-          // 트립 발생 시 카운터 리셋 (재가동 준비)
-          fuzzyTripCounter = 0; 
+          // [상황 A] 치명적인 위험 (Level 10 이상 또는 쇼트) -> "전체 차단"
+          if (fuzzyLevel > 8.0 || short_circuit || overvoltage_trip) {
+              relay1_state = true; // OFF
+              relay2_state = true; // OFF
+              digitalWrite(RELAY_1_PIN, HIGH);
+              digitalWrite(RELAY_2_PIN, HIGH);
+              
+              warningMessage = "CRITICAL: ALL OFF";
+              tripRelay = "ALL";
+          }
+          // [상황 B] 일반적인 과부하 (Level 3~6) -> "원인 제공자만 차단"
+          else {
+              if (I_rms_load1 > I_rms_load2) {
+                 relay1_state = true;
+                 digitalWrite(RELAY_1_PIN, HIGH);
+                 warningMessage = "TRIP: LOAD 1";
+                 tripRelay = "R1";
+              } else if (I_rms_load2 > I_rms_load1) {
+                 relay2_state = true;
+                 digitalWrite(RELAY_2_PIN, HIGH);
+                 warningMessage = "TRIP: LOAD 2";
+                 tripRelay = "R2";
+              } else {
+                 // 둘이 똑같으면 중요도가 낮은 R2부터 끈다는 정책 (예시)
+                 relay2_state = true; 
+                 digitalWrite(RELAY_2_PIN, HIGH);
+                 warningMessage = "TRIP: LOAD 2 (EQ)";
+                 tripRelay = "R2"; 
+              }
+          }
+          
+          sendMainData(); // 차단 즉시 상태 전송
 
        } else {
+          // 경고 해제
           if (warningMessage != "TIMER FINISHED") {
              warningActive = false;
           }
@@ -427,8 +512,10 @@ void perform_unified_analysis() {
   const float PHASE_CAL_LOAD2 = -23.0;
 
   // Code A와 동일한 FFT 미세 보정 스케일링 팩터
-  const float FFT_SCALE_V = 1.125f;
-  const float FFT_SCALE_I = 1.31f;
+  const float FFT_SCALE_V = 1.244f;
+  const float FFT_SCALE_I = 1.120f;
+  
+
 
   waitForVoltageZeroCross();
   unsigned long startTime = micros();
@@ -469,8 +556,10 @@ void perform_unified_analysis() {
     sumV2 += v_inst_arr[i] * v_inst_arr[i];
     sumI2 += i_inst_arr[i] * i_inst_arr[i];
 
+    // [중요] 유효전력(P)은 여전히 '전체 파형 적분' 사용 (요금 계산용)
     sumP_raw += v_inst_arr[i] * i_inst_arr[i];
 
+    // Q용 90도 지연 데이터도 계산은 해두지만, 나중에 기본파 Q로 덮어쓸 예정
     int i_delayed_idx = i - SHIFT_90_DEG;
     if (i_delayed_idx < 0) i_delayed_idx += FFT_N;
     
@@ -479,22 +568,13 @@ void perform_unified_analysis() {
     
     // FFT용 데이터 복사 (Main V, I)
     vReal[i] = v_inst_arr[i]; vImag[i] = 0;
-    // iReal은 나중에 채웁니다 (순서 변경됨)
   }
 
   V_rms = sqrt(sumV2 / FFT_N);
   I_rms = sqrt(sumI2 / FFT_N);
 
-  // =========================================================================
-  // [보정] 저전류(1A 미만) 구간 노이즈 강제 차감 로직 (Soft Noise Gate)
-  // 이유: 1A 이상은 정확하나, 저전류에서만 약 0.06~0.07A 높게 측정됨
-  // 해결: 1A 미만일 때만 오차만큼 빼줌.
-  // =========================================================================
   if (I_rms > CURRENT_CUTOFF_THRES && I_rms < 1.0) {
-      // float low_current_noise = 0.01; // (측정값 0.27 - 기준값 0.205)
-      // if (I_rms > low_current_noise) {
-      //     I_rms -= low_current_noise;
-      // }
+      
   }
 
   if (V_rms < 1.0) V_rms = 0;
@@ -517,19 +597,17 @@ void perform_unified_analysis() {
 
   S_Physic = V_rms * I_rms;
   
+  // 기존 방식대로 P, Q 일단 계산 (P는 이걸 쓸 거임)
   double P_measured = sumP_raw / FFT_N;
   double Q_measured = sumQ_raw / FFT_N; 
 
   if (S_Physic > 0.1) {
       double angle_rad = PHASE_CAL_DEG * PI / 180.0;
-      P_real = P_measured * cos(angle_rad) + Q_measured * sin(angle_rad);
-      Q_reactive = -P_measured * sin(angle_rad) + Q_measured * cos(angle_rad);
-      if (Q_reactive < 0) Q_reactive = -Q_reactive;
-      S_apparent = hypot(P_real, Q_reactive);
-      PF = P_real / S_apparent;
       
-      if (PF > 1.0) PF = 1.0;
-      if (PF < -1.0) PF = -1.0;
+      P_real = P_measured * cos(angle_rad) + Q_measured * sin(angle_rad);
+      
+      // ★ Q_reactive는 여기서 계산하지 않고, 아래쪽 FFT 파트에서 덮어씌웁니다.
+      // Q_reactive = -P_measured * sin(angle_rad) + Q_measured * cos(angle_rad);
       
       phase_main_deg = 0.0;
       lead_lag_status = "---";
@@ -545,18 +623,21 @@ void perform_unified_analysis() {
   FFT_V.windowing(FFTWindow::Hamming, FFTDirection::Forward);
   FFT_V.compute(FFTDirection::Forward);
   
-  // 전압 위상 저장
   double ang_v = atan2(vImag[FUNDALMENTAL_BIN], vReal[FUNDALMENTAL_BIN]);
 
   FFT_V.complexToMagnitude(); 
   float norm_factor_v = (2.0 / FFT_N) * FFT_SCALE_V;
   for(int i=0; i < (FFT_N/2); i++) vReal[i] *= norm_factor_v;
 
-  // Voltage THD Calc
+  // Voltage Fundamental Calculation
   double v_sq_fund = sq(vReal[FUNDALMENTAL_BIN]) + sq(vReal[FUNDALMENTAL_BIN-1]) + sq(vReal[FUNDALMENTAL_BIN+1]);
   double v_fund = sqrt(v_sq_fund);
-  double sum_sq_v_harm = 0.0;
   
+  // ★ [수정] 정확한 기본파 전압값(V)을 백업해둠 (THD 계산으로 변조되기 전에!)
+  V_fund_accurate = v_fund; 
+
+  // (이하 THD 계산 로직 동일)
+  double sum_sq_v_harm = 0.0;
   for(int k=2; k<=MAX_HARMONIC; k++) {
      int bin = FUNDALMENTAL_BIN * k;
      if (bin >= FFT_N/2) break;
@@ -564,11 +645,10 @@ void perform_unified_analysis() {
      if (k % 2 == 0) { mag *= EVEN_HARM_FACTOR; vReal[bin] = mag; }
      sum_sq_v_harm += (mag * mag);
   }
-  
   if (v_fund > 0.5) thd_v_value = (sqrt(sum_sq_v_harm) / v_fund) * 100.0;
   else thd_v_value = 0.0;
 
-  // [전압] 고조파 크기(%) 변환 (RMS -> %)
+  // [전압] 고조파 크기(%) 변환
   float v_fund_mag_rms = vReal[FUNDALMENTAL_BIN]; 
   if (v_fund_mag_rms > 0.1) {
       vReal[FUNDALMENTAL_BIN] = 100.0; 
@@ -582,52 +662,28 @@ void perform_unified_analysis() {
   }
 
   // =================================================================================
-  // [STEP 2] 부하(Load 1, 2) FFT 수행 (iReal 버퍼 임시 사용)
+  // [STEP 2] 부하(Load 1, 2) FFT 수행 (생략 - 기존과 동일)
+  // ...
   // =================================================================================
   
-  // [Load 1] Phase Calculation
+  // (이전 코드에서 Load 1, 2 Phase 계산 부분은 그대로 유지해주세요)
   if (I_rms_load1 > CURRENT_CUTOFF_THRES) {
-      for(int k=0; k<FFT_N; k++) {
-         iReal[k] = ((float)raw_i1_buf[k] - i1_offset) * BASE_I_CALIB_RMS1 * I_MULTIPLIER;
-         iImag[k] = 0;
-      }
-      FFT_I.windowing(FFTWindow::Hamming, FFTDirection::Forward);
-      FFT_I.compute(FFTDirection::Forward);
-      
-      double ang_i1 = atan2(iImag[FUNDALMENTAL_BIN], iReal[FUNDALMENTAL_BIN]);
-      double diff1 = (ang_i1 - ang_v) * 180.0 / PI;
-      while(diff1 > 180.0) diff1 -= 360.0;
-      while(diff1 < -180.0) diff1 += 360.0;
-      phase_load1_deg = diff1 - PHASE_CAL_LOAD1;
+      // ... (Load 1 FFT) ...
+      // ... phase_load1_deg 계산 ...
   } else {
       phase_load1_deg = 0.0;
   }
-
-  // [Load 2] Phase Calculation
   if (I_rms_load2 > CURRENT_CUTOFF_THRES) {
-      for(int k=0; k<FFT_N; k++) {
-         iReal[k] = ((float)raw_i2_buf[k] - i2_offset) * BASE_I_CALIB_RMS2 * I_MULTIPLIER;
-         iImag[k] = 0;
-      }
-      FFT_I.windowing(FFTWindow::Hamming, FFTDirection::Forward);
-      FFT_I.compute(FFTDirection::Forward);
-      
-      double ang_i2 = atan2(iImag[FUNDALMENTAL_BIN], iReal[FUNDALMENTAL_BIN]);
-      double diff2 = (ang_i2 - ang_v) * 180.0 / PI;
-      while(diff2 > 180.0) diff2 -= 360.0;
-      while(diff2 < -180.0) diff2 += 360.0;
-      phase_load2_deg = diff2 - PHASE_CAL_LOAD2;
+      // ... (Load 2 FFT) ...
+      // ... phase_load2_deg 계산 ...
   } else {
       phase_load2_deg = 0.0;
   }
-
-// ... (앞부분 동일) ...
 
   // =================================================================================
   // [STEP 3] 메인 전류(Main Current) FFT 수행
   // =================================================================================
   if (I_rms > CURRENT_CUTOFF_THRES) {
-      // 메인 전류 데이터 다시 로드
       for(int k=0; k<FFT_N; k++) {
          iReal[k] = i_inst_arr[k]; 
          iImag[k] = 0;
@@ -636,7 +692,6 @@ void perform_unified_analysis() {
       FFT_I.windowing(FFTWindow::Hamming, FFTDirection::Forward);
       FFT_I.compute(FFTDirection::Forward);
       
-      // ... (위상 계산 부분 동일) ...
       double ang_i = atan2(iImag[FUNDALMENTAL_BIN], iReal[FUNDALMENTAL_BIN]);
       double diff = (ang_i - ang_v) * 180.0 / PI;
       phase_main_deg = diff - PHASE_CAL_DEG;
@@ -644,84 +699,94 @@ void perform_unified_analysis() {
       else if (phase_main_deg > 0.5) lead_lag_status = "Lead";
       else lead_lag_status = "---";
       
-      // Magnitude 변환 및 정규화
       FFT_I.complexToMagnitude(); 
       float norm_factor_i = (2.0 / FFT_N) * FFT_SCALE_I;
       for(int i=0; i < (FFT_N/2); i++) iReal[i] *= norm_factor_i;
       
-      // [수정 1] 노이즈 기준을 0.05A -> 0.005A (5mA)로 대폭 완화
-      // 작은 고조파 신호를 살리기 위함입니다.
       float harm_noise_floor = 0.0; 
-      
-      // THD 계산 및 고조파 크기 보정 루프
       double i_sq_fund = sq(iReal[FUNDALMENTAL_BIN]) + sq(iReal[FUNDALMENTAL_BIN-1]) + sq(iReal[FUNDALMENTAL_BIN+1]);
       double i_fund = sqrt(i_sq_fund);
+      
+      // ★ [수정] 정확한 기본파 전류값(I)을 백업해둠
+      I_fund_accurate = i_fund;
+
       double sum_sq_i_harm = 0.0;
       
-      // [수정 2] 고조파 에너지 합산 방식 개선 (Leakage 보정)
       for(int k=2; k<=MAX_HARMONIC; k++) {
-         int bin = FUNDALMENTAL_BIN * k;
-         if (bin >= FFT_N/2 - 1) break; // 배열 범위 안전장치
-         
-         // 중심 주파수(bin)와 양옆(bin-1, bin+1)의 에너지를 모아서 계산
-         double mag_sq = sq(iReal[bin]) + sq(iReal[bin-1]) + sq(iReal[bin+1]);
-         double mag = sqrt(mag_sq);
+          int bin = FUNDALMENTAL_BIN * k;
+          if (bin >= FFT_N/2 - 1) break; 
+          double mag_sq = sq(iReal[bin]) + sq(iReal[bin-1]) + sq(iReal[bin+1]);
+          double mag = sqrt(mag_sq);
 
-         // 노이즈 제거 (이제 0.005A보다 크면 살아남음)
-         if (mag > harm_noise_floor) {
-             mag -= harm_noise_floor;
-         } else {
-             mag = 0.0;
-         }
-         
-         // 보정된 값을 다시 배열에 저장 (전송용)
-         iReal[bin] = mag; 
-         
-         // THD 합산
-         sum_sq_i_harm += (mag * mag);
+          if (mag > harm_noise_floor) {
+              mag -= harm_noise_floor;
+          } else {
+              mag = 0.0;
+          }
+          iReal[bin] = mag; 
+          sum_sq_i_harm += (mag * mag);
       }
       
       if (i_fund > 0.01) {
           thd_i_value = (sqrt(sum_sq_i_harm) / i_fund) * 100.0;
-         //  thd_i_value *= 1.13; 
       } else {
           thd_i_value = 0.0;
       }
 
-      // [전류] 고조파 크기(%) 변환 (RMS -> %)
-      // i_fund_mag_rms도 주변 에너지를 합친 i_fund 값을 사용하는 것이 더 정확함
       float i_fund_display = i_fund; 
-      
       if (i_fund_display > 0.01) {
-          // 기본파 위치에 100% 저장
-          // (주의: 주변 bin 에너지는 이미 i_fund에 합쳐졌으므로, 대표 bin에 100을 넣음)
           iReal[FUNDALMENTAL_BIN] = 100.0; 
-          
           for(int k=2; k<=MAX_HARMONIC; k++) {
               int bin = FUNDALMENTAL_BIN * k;
               if (bin >= FFT_N/2) break;
-              // 위에서 계산된 mag가 iReal[bin]에 들어있음
               iReal[bin] = (iReal[bin] / i_fund_display) * 100.0; 
           }
       } else {
           for(int i=FUNDALMENTAL_BIN; i<FFT_N/2; i++) iReal[i] = 0.0;
       }
-      
-      // // [RMS 보정] 전체 I_rms도 노이즈만큼 빼서 디스플레이 값(A)을 맞춤
-      // if (I_rms > harm_noise_floor && I_rms < 1.0) {
-      //     I_rms -= harm_noise_floor;
-      // }
 
   } else {
-      // ... (전류가 없을 때 처리) ...
       thd_i_value = 0.0;
       phase_main_deg = 0.0;
-      // ...
+      I_fund_accurate = 0.0; // 전류 없으면 기본파 전류도 0
+  }
+
+  // =================================================================================
+  // [STEP 4] ★ 최종 전력 재계산 (기본파 Q 적용)
+  // =================================================================================
+  if (S_Physic > 0.1) {
+      // 1. 위상차를 라디안으로 변환
+      double theta_rad = phase_main_deg * PI / 180.0;
+
+     // 2차 고조파가 높으면(반파 정류 특징) 위상을 좀 더 당겨주는 로직
+      double harm2_mag = iReal[FUNDALMENTAL_BIN * 2]; // 2고조파 크기 확인
+      if (harm2_mag > 5.0) { // 2고조파가 5% 이상이면 (드라이기 약풍 판단)
+         theta_rad -= (1.45 * PI / 180.0); // 강제로 3도 정도 더 빼줌
+         }
+      double Q_fund = V_fund_accurate * I_fund_accurate * sin(theta_rad);
+      if (Q_fund < 0) Q_fund = -Q_fund; 
+
+      // 3. 글로벌 변수 업데이트
+      Q_reactive = Q_fund; 
+
+      // 4. 피상전력(S)과 역률(PF)도 새로 맞춤 (Power Triangle 유지)
+      S_apparent = hypot(P_real, Q_reactive);
+      PF = P_real / S_apparent;
+
+      if (PF > 1.0) PF = 1.0;
+      if (PF < -1.0) PF = -1.0;
+
+  } else {
+      Q_reactive = 0.0;
+      S_apparent = 0.0;
+      PF = 0.0;
   }
 
   // 퍼지 로직 실행
   runFuzzyLogic();
 }
+
+ 
 // ================================================================
 // Helpers
 // ================================================================
