@@ -200,9 +200,9 @@ bool isPresetSaveMode = false;
 // ==========================================
 // [추가] 네트워크 및 ThingSpeak 변수/상수
 // ==========================================
-String wifiSSID = "Mathsaves"; 
-String wifiPASS = "19886382"; 
-String apiKey = "X50GVA1VU213PQ3Z"; 
+String wifiSSID = ""; 
+String wifiPASS = ""; 
+String apiKey = ""; 
 
 // [Mod] 네트워크 상태 관리 (OFF -> WAIT -> ON)
 enum WifiState { WIFI_OFF, WIFI_WAIT, WIFI_CONNECTED_STATE };
