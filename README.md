@@ -93,5 +93,3 @@ The system supports both manual multiplier adjustment and an automatic calibrati
 This project involves measuring high-voltage AC electricity. Always use extreme caution. The authors are not responsible for any damage or injury caused by the use of this software or hardware.
 
 ---
-
-Would you like me to add a **detailed technical section explaining the Fuzzy Logic membership functions** (, , etc.) or a **wiring guide** based on the pin definitions in the code?
