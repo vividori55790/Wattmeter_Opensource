@@ -83,8 +83,8 @@ The system supports both manual multiplier adjustment and an automatic calibrati
 ## 👥 Team
 
 * **Park Raewon** - Team Leader, Processor.ino
-* **Park Yeseong** - Development, Controller.ino
-* **Joo Hwijae** - Development, Hardware
+* **Park Yeseong** - Development, Hardware
+* **Joo Hwijae** - Development, Controller.ino
 
 ---
 
